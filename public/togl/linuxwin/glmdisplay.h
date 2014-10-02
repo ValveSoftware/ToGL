@@ -36,6 +36,20 @@
 #include "SDL_opengl.h"
 #endif
 
+#ifdef OSX
+#include <OpenGL/OpenGL.h>
+#include <OpenGL/gl.h>
+#include <OpenGL/CGLTypes.h>
+#include <OpenGL/CGLRenderers.h>
+#include <OpenGL/CGLCurrent.h>
+#endif
+
+#ifdef MAC_OS_X_VERSION_10_9
+typedef uint32_t CGDirectDisplayID;
+typedef uint32_t CGOpenGLDisplayMask;
+typedef double CGRefreshRate;
+#endif
+
 typedef void _PseudoNSGLContext;					// aka NSOpenGLContext
 typedef _PseudoNSGLContext	*PseudoNSGLContextPtr;
 

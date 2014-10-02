@@ -40,8 +40,12 @@
 	#include <OpenGL/CGLTypes.h>
 	#include <OpenGL/CGLRenderers.h>
 	#include <OpenGL/CGLCurrent.h>
+	#include <AvailabilityMacros.h>
+
+#ifndef MAC_OS_X_VERSION_10_9
 	#include <OpenGL/CGLProfiler.h>
 	#include <ApplicationServices/ApplicationServices.h>
+#endif
 #endif
 
 #include "tier0/platform.h"
@@ -319,8 +323,10 @@ public:
 	CUtlVector< GLMTextSection >	m_sectionTable;
 };
 
+#ifndef OSX
 void GLMGPUTimestampManagerInit();
 void GLMGPUTimestampManagerDeinit();
 void GLMGPUTimestampManagerTick();
+#endif
 
 #endif // GLMBASICS_H

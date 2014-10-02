@@ -33,7 +33,12 @@
 
 // 7LS TODO : took out cmdline here
 bool g_bUsePseudoBufs = false; //( Plat_GetCommandLineA() ) ? ( strstr( Plat_GetCommandLineA(), "-gl_enable_pseudobufs" ) != NULL ) : false;
+#ifdef OSX
+// Significant perf degradation on some OSX parts if static buffers not disabled
+bool g_bDisableStaticBuffer = true;
+#else
 bool g_bDisableStaticBuffer = false; //( Plat_GetCommandLineA() ) ? ( strstr( Plat_GetCommandLineA(), "-gl_disable_static_buffer" ) != NULL ) : false;
+#endif
 
 // http://www.opengl.org/registry/specs/ARB/vertex_buffer_object.txt
 // http://www.opengl.org/registry/specs/ARB/pixel_buffer_object.txt
@@ -51,6 +56,130 @@ char ALIGN16 CGLMBuffer::m_StaticBuffers[ GL_MAX_STATIC_BUFFERS ][ GL_STATIC_BUF
 bool CGLMBuffer::m_bStaticBufferUsed[ GL_MAX_STATIC_BUFFERS ];
 
 extern bool g_bNullD3DDevice; 
+
+//===========================================================================//
+
+static uint gMaxPersistentOffset[kGLMNumBufferTypes] =
+{
+	0,
+	0,
+	0,
+	0
+};
+CON_COMMAND( gl_persistent_buffer_max_offset, "" )
+{
+	ConMsg( "OpenGL Persistent buffer max offset :\n" );
+	ConMsg( "  Vertex buffer : %d bytes (%f MB) \n", gMaxPersistentOffset[kGLMVertexBuffer], gMaxPersistentOffset[kGLMVertexBuffer] / (1024.0f*1024.0f) );
+	ConMsg( "  Index buffer : %d bytes (%f MB) \n", gMaxPersistentOffset[kGLMIndexBuffer], gMaxPersistentOffset[kGLMIndexBuffer] / (1024.0f*1024.0f) );
+	ConMsg( "  Uniform buffer : %d bytes (%f MB) \n", gMaxPersistentOffset[kGLMUniformBuffer], gMaxPersistentOffset[kGLMUniformBuffer] / (1024.0f*1024.0f) );
+	ConMsg( "  Pixel buffer : %d bytes (%f MB) \n", gMaxPersistentOffset[kGLMPixelBuffer], gMaxPersistentOffset[kGLMPixelBuffer] / (1024.0f*1024.0f) );
+}
+
+CPersistentBuffer::CPersistentBuffer()
+:
+	m_nSize( 0 )
+	, m_nHandle( 0 )
+	, m_pImmutablePersistentBuf( NULL )
+	, m_nOffset( 0 )
+#ifdef HAVE_GL_ARB_SYNC
+	, m_nSyncObj( 0 )
+#endif
+{}
+
+CPersistentBuffer::~CPersistentBuffer()
+{
+	Deinit();
+}
+
+void CPersistentBuffer::Init( EGLMBufferType type,uint nSize )
+{
+	Assert( gGL->m_bHave_GL_ARB_buffer_storage );
+	Assert( gGL->m_bHave_GL_ARB_map_buffer_range );
+	
+	m_nSize		= nSize;
+	m_nOffset	= 0;
+	m_type		= type;
+	
+	switch ( type )
+	{
+	case kGLMVertexBuffer:	m_buffGLTarget = GL_ARRAY_BUFFER_ARB; break;
+	case kGLMIndexBuffer:	m_buffGLTarget = GL_ELEMENT_ARRAY_BUFFER_ARB; break;
+
+	default: Assert( nSize == 0 );
+	}
+	
+	if ( m_nSize > 0 )
+	{
+		gGL->glGenBuffersARB( 1, &m_nHandle );
+		gGL->glBindBufferARB( m_buffGLTarget, m_nHandle );
+
+		// Create persistent immutable buffer that we will permanently map.  This buffer can be written from any thread (not just
+		// the renderthread)
+		gGL->glBufferStorage( m_buffGLTarget, m_nSize, (const GLvoid *)NULL, GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT ); // V_GL_REQ: GL_ARB_buffer_storage, GL_ARB_map_buffer_range, GL_VERSION_4_4
+
+		// Map the buffer for all of eternity.  Pointer can be used from multiple threads.
+		m_pImmutablePersistentBuf = gGL->glMapBufferRange( m_buffGLTarget, 0, m_nSize, GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT ); // V_GL_REQ: GL_ARB_map_buffer_range, GL_ARB_buffer_storage, GL_VERSION_4_4
+		Assert( m_pImmutablePersistentBuf != NULL );
+	}
+}
+
+void CPersistentBuffer::Deinit()
+{
+	if ( !m_pImmutablePersistentBuf )
+	{
+		return;
+	}
+
+	BlockUntilNotBusy();
+
+	gGL->glBindBufferARB( m_buffGLTarget, m_nHandle );
+	gGL->glUnmapBuffer( m_buffGLTarget );
+	gGL->glBindBufferARB( m_buffGLTarget, 0 );
+
+	gGL->glDeleteBuffersARB( 1, &m_nHandle );
+	
+	m_nSize		= 0;
+	m_nHandle	= 0;
+	m_nOffset	= 0;
+	m_pImmutablePersistentBuf = NULL;
+}
+
+void CPersistentBuffer::InsertFence()
+{
+#ifdef HAVE_GL_ARB_SYNC
+	if (m_nSyncObj)
+	{
+		gGL->glDeleteSync( m_nSyncObj );
+	}
+
+	m_nSyncObj = gGL->glFenceSync( GL_SYNC_GPU_COMMANDS_COMPLETE, 0 );
+#endif
+}
+
+void CPersistentBuffer::BlockUntilNotBusy()
+{
+#ifdef HAVE_GL_ARB_SYNC
+	if (m_nSyncObj)
+	{
+		gGL->glClientWaitSync( m_nSyncObj, GL_SYNC_FLUSH_COMMANDS_BIT, 3000000000000ULL );
+
+		gGL->glDeleteSync( m_nSyncObj );
+
+		m_nSyncObj = 0;
+	}
+#endif
+	m_nOffset = 0;
+}
+
+void CPersistentBuffer::Append( uint nSize )
+{
+	m_nOffset += nSize;
+	Assert( m_nOffset <= m_nSize );
+
+	gMaxPersistentOffset[m_type] = Max( m_nOffset, gMaxPersistentOffset[m_type] );
+}
+
+//===========================================================================//
 
 #if GL_ENABLE_INDEX_VERIFICATION
 
@@ -324,6 +453,8 @@ CGLMBuffer::CGLMBuffer( GLMContext *pCtx, EGLMBufferType type, uint size, uint o
 
 	m_pStaticBuffer = NULL;
 	m_nPinnedMemoryOfs = -1;
+	m_nPersistentBufferStartOffset = 0;
+	m_bUsingPersistentBuffer = false;
 
 	m_bEnableAsyncMap = false;
 	m_bEnableExplicitFlush = false;
@@ -571,6 +702,21 @@ void CGLMBuffer::Lock( GLMBuffLockParams *pParams, char **pAddressOut )
 #endif
 
 	m_pStaticBuffer = NULL;
+	m_bUsingPersistentBuffer = false;
+
+	uint padding = 0;
+	if ( m_bDynamic && gGL->m_bHave_GL_ARB_buffer_storage )
+	{
+		// Compute padding to add to make sure the start offset is valid
+		CPersistentBuffer *pTempBuffer = m_pCtx->GetCurPersistentBuffer( m_type );
+		uint persistentBufferOffset = pTempBuffer->GetOffset();
+
+		if (pParams->m_nOffset > persistentBufferOffset)
+		{
+			// Make sure the start offset if valid (adding padding to the persistent buffer)
+			padding = pParams->m_nOffset - persistentBufferOffset;
+		}
+	}
 	
 	if ( m_bPseudo )
 	{
@@ -619,6 +765,34 @@ void CGLMBuffer::Lock( GLMBuffLockParams *pParams, char **pAddressOut )
 		}
 #endif
 	}
+	else if ( m_bDynamic && gGL->m_bHave_GL_ARB_buffer_storage && ( m_pCtx->GetCurPersistentBuffer( m_type )->GetBytesRemaining() >= ( pParams->m_nSize + padding ) ) )
+	{
+		CPersistentBuffer *pTempBuffer = m_pCtx->GetCurPersistentBuffer( m_type );
+
+		// Make sure the start offset if valid (adding padding to the persistent buffer)
+		pTempBuffer->Append( padding );
+
+		uint persistentBufferOffset = pTempBuffer->GetOffset();
+		uint startOffset = persistentBufferOffset - pParams->m_nOffset;
+
+		if ( pParams->m_bDiscard || ( startOffset != m_nPersistentBufferStartOffset ) )
+		{
+			m_nRevision++;
+			// Offset to be added to the vertex and index buffer when setting the vertex and index buffer (before drawing)
+			// Since we are using a immutable buffer storage, the persistent buffer is actually bigger than
+			// buffer size requested upon creation. We keep appending to the end of the persistent buffer 
+			// and therefore need to keep track of the start of the actual buffer (in the persistent one)
+			m_nPersistentBufferStartOffset = startOffset;
+
+			//DevMsg( "Discard (%s): startOffset = %d\n", pParams->m_bDiscard ? "true" : "false", m_nPersistentBufferStartOffset );
+		}
+
+		resultPtr = static_cast<char*>(pTempBuffer->GetPtr()) + persistentBufferOffset;
+		m_bUsingPersistentBuffer = true;
+
+		//DevMsg( " --> buff=%x, startOffset=%d, paramsOffset=%d, persistOffset = %d\n", this, m_nPersistentBufferStartOffset, pParams->m_nOffset, persistentBufferOffset );
+	}
+#ifndef OSX
 	else if ( m_bDynamic && gGL->m_bHave_GL_AMD_pinned_memory && ( m_pCtx->GetCurPinnedMemoryBuffer()->GetBytesRemaining() >= pParams->m_nSize ) )
 	{
 		if ( pParams->m_bDiscard )
@@ -637,6 +811,7 @@ void CGLMBuffer::Lock( GLMBuffLockParams *pParams, char **pAddressOut )
 		
 		pTempBuffer->Append( pParams->m_nSize );
 	}
+#endif // OSX
 	else if ( !g_bDisableStaticBuffer && ( pParams->m_bDiscard || pParams->m_bNoOverwrite ) && ( pParams->m_nSize <= GL_STATIC_BUFFER_SIZE ) )
 	{
 #if TOGL_SUPPORT_NULL_DEVICE
@@ -888,6 +1063,7 @@ void CGLMBuffer::Unlock( int nActualSize, const void *pActualData )
 		g_nTotalVBLockBytes += nActualSize;
 #endif
 
+#ifndef OSX
 	if ( m_nPinnedMemoryOfs >= 0 )
 	{
 #if TOGL_SUPPORT_NULL_DEVICE
@@ -911,6 +1087,18 @@ void CGLMBuffer::Unlock( int nActualSize, const void *pActualData )
 #endif
 		
 		m_nPinnedMemoryOfs = -1;
+	}
+	else
+#endif // !OSX
+	if ( m_bUsingPersistentBuffer )
+	{
+		if ( nActualSize )
+		{
+			CPersistentBuffer *pTempBuffer = m_pCtx->GetCurPersistentBuffer( m_type );
+			pTempBuffer->Append( nActualSize );
+
+			//DevMsg( "   <-- actualSize=%d, persistOffset = %d\n", nActualSize, pTempBuffer->GetOffset() );
+		}
 	}
 	else if ( m_pStaticBuffer )
 	{
@@ -1011,4 +1199,9 @@ void CGLMBuffer::Unlock( int nActualSize, const void *pActualData )
 	}
 
 	m_bMapped = false;
+}
+
+GLuint CGLMBuffer::GetHandle() const
+{ 
+	return ( m_bUsingPersistentBuffer ? m_pCtx->GetCurPersistentBuffer( m_type )->GetHandle() : m_nHandle ); 
 }

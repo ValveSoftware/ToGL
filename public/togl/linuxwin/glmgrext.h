@@ -113,3 +113,11 @@
 #define GL_MAP_UNSYNCHRONIZED_BIT         0x0020
 #endif
 
+#ifndef GL_MAP_PERSISTENT_BIT
+#define GL_MAP_PERSISTENT_BIT				0x0040
+#endif
+
+#ifndef GL_MAP_COHERENT_BIT
+#define GL_MAP_COHERENT_BIT					0x0080
+#endif
+

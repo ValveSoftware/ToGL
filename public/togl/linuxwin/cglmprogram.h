@@ -132,8 +132,8 @@ public:
 	void	SetProgramText			( char *text );				// import text to GLM object - invalidate any prev compiled program
 	void	SetShaderName			( const char *name );				// only used for debugging/telemetry markup
 	
-	bool	CompileActiveSources	( void );					// compile only the flavors that were provided.
-	bool	Compile					( EGLMProgramLang lang );	
+	void	CompileActiveSources	( void );					// compile only the flavors that were provided.
+	void	Compile					( EGLMProgramLang lang );	
 	bool	CheckValidity			( EGLMProgramLang lang );
 
 	void	LogSlow					( EGLMProgramLang lang );	// detailed spew when called for first time; one liner or perhaps silence after that
@@ -213,9 +213,14 @@ public:
 
 	bool	SetProgramPair			( CGLMProgram *vp, CGLMProgram *fp );
 		// true result means successful link and query
+		// Note that checking the link status and querying the uniform can be optionally
+		// deferred to take advantage of multi-threaded compilation in the driver
 
 	bool	RefreshProgramPair		( void );
 		// re-link and re-query the uniforms
+
+	bool	ValidateProgramPair( void );
+		// true result means successful link and query
 
 	FORCEINLINE void UpdateScreenUniform( uint nWidthHeight )
 	{
@@ -272,6 +277,7 @@ public:
 
 	// other stuff
 	bool					m_valid;				// true on successful link
+	bool					m_bCheckLinkStatus;
 	uint					m_revision;				// if this pair is relinked, bump this number.
 
 	GLint					m_locVertexScreenParams; // vcscreen

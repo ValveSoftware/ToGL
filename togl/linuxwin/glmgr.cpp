@@ -32,7 +32,7 @@
 #include "tier0/vprof.h"
 #include "glmtexinlines.h"
 
-#include "materialsystem/ishader.h"
+#include "materialsystem/IShader.h"
 #include "appframework/ilaunchermgr.h"
 
 #include "convar.h"
@@ -483,7 +483,7 @@ GLMContext *GLMgr::GetCurrentContext( void )
 // GLMContext public methods
 void GLMContext::MakeCurrent( bool bRenderThread )
 {
-	TM_ZONE( TELEMETRY_LEVEL0, 0, "GLMContext::MakeCurrent" );
+	tmZone( TELEMETRY_LEVEL0, 0, "GLMContext::MakeCurrent" );
 	Assert( m_nCurOwnerThreadId == 0 || m_nCurOwnerThreadId == ThreadGetCurrentId() );
 		
 #if defined( USE_SDL )
@@ -528,7 +528,7 @@ void GLMContext::MakeCurrent( bool bRenderThread )
 
 void GLMContext::ReleaseCurrent( bool bRenderThread )
 {
-	TM_ZONE( TELEMETRY_LEVEL0, 0, "GLMContext::ReleaseCurrent" );
+	tmZone( TELEMETRY_LEVEL0, 0, "GLMContext::ReleaseCurrent" );
 	Assert( m_nCurOwnerThreadId == ThreadGetCurrentId() );
 		
 #if defined( USE_SDL )
@@ -634,10 +634,12 @@ void GLMContext::ForceFlushStates()
 	gGL->glBindBufferARB( GL_ELEMENT_ARRAY_BUFFER_ARB, m_nBoundGLBuffer[ kGLMIndexBuffer] );
 	gGL->glBindBufferARB( GL_ARRAY_BUFFER_ARB, m_nBoundGLBuffer[ kGLMVertexBuffer] );
 
+#ifndef OSX
 	if ( gGL->m_bHave_GL_AMD_pinned_memory )
 	{
 		gGL->glBindBufferARB( GL_EXTERNAL_VIRTUAL_MEMORY_BUFFER_AMD, m_PinnedMemoryBuffers[m_nCurPinnedMemoryBuffer].GetHandle() );
 	}
+#endif
 }
 
 const GLMRendererInfoFields& GLMContext::Caps( void )
@@ -1709,6 +1711,14 @@ void GLMContext::PreloadTex( CGLMTex *tex, bool force )
 	if (!preloadPair)
 		return;
 
+	if ( !preloadPair->m_valid )
+	{
+		if ( !preloadPair->ValidateProgramPair() )
+		{
+			return;
+		}
+	}
+
 	gGL->glUseProgram( (GLuint)preloadPair->m_program );
 					
 	m_pBoundPair = preloadPair;
@@ -1733,11 +1743,13 @@ void GLMContext::PreloadTex( CGLMTex *tex, bool force )
 		
 	// bind texture and sampling params
 	CGLMTex *pPrevTex = m_samplers[15].m_pBoundTex;
-	
+
+#ifndef OSX // 10.6
 	if ( m_bUseSamplerObjects )
 	{
 		gGL->glBindSampler( 15, 0 );
 	}
+#endif // !OSX
 
 	BindTexToTMU( tex, 15 );
 	
@@ -1822,15 +1834,7 @@ CGLMProgram	*GLMContext::NewProgram( EGLMProgramType type, char *progString, con
 	
 	prog->SetProgramText( progString );
 	prog->SetShaderName( pShaderName );
-	bool compile_ok = prog->CompileActiveSources();
-	(void)compile_ok;
-	if ( !compile_ok )
-	{
-		GLMDebugPrintf( "Compile of \"%s\" Failed:\n", pShaderName );
-		Plat_DebugString( progString );
-	}
-
-	AssertOnce( compile_ok );
+	prog->CompileActiveSources();
 
 	return prog;
 }
@@ -1876,12 +1880,24 @@ void GLMContext::SetDrawingLang( EGLMProgramLang lang, bool immediate )
 
 void GLMContext::LinkShaderPair( CGLMProgram *vp, CGLMProgram *fp )
 {
-	if ( (m_pairCache) && (m_drawingLang==kGLMGLSL) && (vp && vp->m_descs[kGLMGLSL].m_valid) && (fp && fp->m_descs[kGLMGLSL].m_valid) )
+	if ( (m_pairCache) && (m_drawingLang==kGLMGLSL) && (vp) && (fp) )
 	{
 		CGLMShaderPair	*pair = m_pairCache->SelectShaderPair( vp, fp, 0 );
 		(void)pair;
 		
 		Assert( pair != NULL );
+
+		NullProgram();	// clear out any binds that were done - next draw will set it right
+	}
+}
+
+void GLMContext::ValidateShaderPair( CGLMProgram *vp, CGLMProgram *fp )
+{
+	if ((m_pairCache) && (m_drawingLang == kGLMGLSL) && (vp) && (fp))
+	{
+		CGLMShaderPair	*pair = m_pairCache->SelectShaderPair( vp, fp, 0 );
+		Assert( pair != NULL );
+		pair->ValidateProgramPair();
 
 		NullProgram();	// clear out any binds that were done - next draw will set it right
 	}
@@ -2228,6 +2244,8 @@ void GLMContext::Present( CGLMTex *tex )
 		g_TelemetryGPUStats.m_nTotalPresent++;
 #endif
 
+#ifdef HAVE_GL_ARB_SYNC
+
 		if ( gGL->m_bHave_GL_AMD_pinned_memory )
 		{
 			m_PinnedMemoryBuffers[m_nCurPinnedMemoryBuffer].InsertFence();
@@ -2238,6 +2256,23 @@ void GLMContext::Present( CGLMTex *tex )
 			
 			gGL->glBindBufferARB( GL_EXTERNAL_VIRTUAL_MEMORY_BUFFER_AMD, m_PinnedMemoryBuffers[m_nCurPinnedMemoryBuffer].GetHandle() );
 		}
+
+		if ( gGL->m_bHave_GL_ARB_buffer_storage )
+		{
+			for (uint lpType = 0; lpType < kGLMNumBufferTypes; ++lpType)
+			{
+				m_persistentBuffer[m_nCurPersistentBuffer][lpType].InsertFence();
+			}
+
+			m_nCurPersistentBuffer = ( m_nCurPersistentBuffer + 1 ) % cNumPersistentBuffers;
+
+			for (uint lpType = 0; lpType < kGLMNumBufferTypes; ++lpType)
+			{
+				m_persistentBuffer[m_nCurPersistentBuffer][lpType].BlockUntilNotBusy();
+			}
+		}
+
+#endif // HAVE_GL_ARB_SYNC
 					
 		bool newRefreshMode = false;
 		// two ways to go:
@@ -2332,7 +2367,7 @@ void GLMContext::Present( CGLMTex *tex )
 		//	put the original FB back in place (both read and draw)
 		// this bind will hit both read and draw bindings
 		BindFBOToCtx( m_drawingFBO, GL_FRAMEBUFFER_EXT );
-		
+
 		// put em back !!
 		m_ScissorEnable.Flush();	
 		m_ScissorBox.Flush();
@@ -2346,7 +2381,9 @@ void GLMContext::Present( CGLMTex *tex )
 	m_nTotalVSUniformCalls = 0, m_nTotalVSUniformBoneCalls = 0, m_nTotalVSUniformsSet = 0, m_nTotalVSUniformsBoneSet = 0, m_nTotalPSUniformCalls = 0, m_nTotalPSUniformsSet = 0;
 #endif
 
+#ifndef OSX
 	GLMGPUTimestampManagerTick();
+#endif
 }
 
 //===============================================================================
@@ -2378,6 +2415,14 @@ bool GLMContext::SetDisplayParams( GLMDisplayParams *params )
 
 ConVar gl_can_query_fast("gl_can_query_fast", "0");
 
+static uint gPersistentBufferSize[kGLMNumBufferTypes] = 
+{
+	2 * 1024 * 1024,	// kGLMVertexBuffer
+	1 * 1024 * 1024,	// kGLMIndexBuffer
+	0,					// kGLMUniformBuffer
+	0,					// kGLMPixelBuffer
+};
+
 GLMContext::GLMContext( IDirect3DDevice9 *pDevice, GLMDisplayParams *params )
 {
 // 	m_bUseSamplerObjects = true;
@@ -2394,12 +2439,18 @@ GLMContext::GLMContext( IDirect3DDevice9 *pDevice, GLMDisplayParams *params )
 	// and doesn't know how to push/pop their binding state. It seems we don't
 	// really use them in this codebase anyhow, except to preload textures.
 	m_bUseSamplerObjects = false;
-
 	if ( CommandLine()->CheckParm( "-gl_enablesamplerobjects" ) )
-	{
 		m_bUseSamplerObjects = true;
-	}
-	
+
+	// Try to get some more free memory by relying on driver host copies instead of ours.
+	//  In some cases the driver will be able to discard their own host copy and rely on GPU
+	//  memory, reducing memory usage.
+	// Sadly, we have to enable tex client storage for srgb decoding. This should only happen
+	//  on Macs w/ OSX 10.6.
+	m_bTexClientStorage = !gGL->m_bHave_GL_EXT_texture_sRGB_decode;
+	if ( CommandLine()->CheckParm( "-gl_texclientstorage" ) )
+		m_bTexClientStorage = true;
+
 	char buf[256];
 	V_snprintf( buf, sizeof( buf ), "GL sampler object usage: %s\n", m_bUseSamplerObjects ? "ENABLED" : "DISABLED" );
 	Plat_DebugString( buf );
@@ -2412,7 +2463,8 @@ GLMContext::GLMContext( IDirect3DDevice9 *pDevice, GLMDisplayParams *params )
 	m_nBatchCounter = 0;
 
 	ClearCurAttribs();
-				
+
+#ifndef OSX
 	m_nCurPinnedMemoryBuffer = 0;
 	if ( gGL->m_bHave_GL_AMD_pinned_memory )
 	{
@@ -2422,6 +2474,19 @@ GLMContext::GLMContext( IDirect3DDevice9 *pDevice, GLMDisplayParams *params )
 		}
 
 		gGL->glBindBufferARB( GL_EXTERNAL_VIRTUAL_MEMORY_BUFFER_AMD, m_PinnedMemoryBuffers[m_nCurPinnedMemoryBuffer].GetHandle() );
+	}
+#endif // OSX
+
+	m_nCurPersistentBuffer = 0;
+	if ( gGL->m_bHave_GL_ARB_buffer_storage )
+	{
+		for ( uint lpType = 0; lpType < kGLMNumBufferTypes; ++lpType )
+		{
+			for ( uint lpNum = 0; lpNum < cNumPersistentBuffers; ++lpNum )
+			{
+				m_persistentBuffer[lpNum][lpType].Init( (EGLMBufferType)lpType, gPersistentBufferSize[lpType] );
+			}
+		}
 	}
 
 	m_bUseBoneUniformBuffers = true;
@@ -2515,15 +2580,20 @@ GLMContext::GLMContext( IDirect3DDevice9 *pDevice, GLMDisplayParams *params )
 	SetDisplayParams( params );
 
 	m_texLayoutTable = new CGLMTexLayoutTable;
-	
-	memset( m_samplerObjectHash, 0, sizeof( m_samplerObjectHash ) );
-	m_nSamplerObjectHashNumEntries = 0;
 
-	for ( uint i = 0; i < cSamplerObjectHashSize; ++i )
+#ifndef OSX
+	if ( m_bUseSamplerObjects )
 	{
-		gGL->glGenSamplers( 1, &m_samplerObjectHash[i].m_samplerObject );
+		memset( m_samplerObjectHash, 0, sizeof( m_samplerObjectHash ) );
+		m_nSamplerObjectHashNumEntries = 0;
+	
+		for ( uint i = 0; i < cSamplerObjectHashSize; ++i )
+		{
+			gGL->glGenSamplers( 1, &m_samplerObjectHash[i].m_samplerObject );
+		}
 	}
-				
+#endif // !OSX
+
 	memset( m_samplers, 0, sizeof( m_samplers ) );
 	for( int i=0; i< GLM_SAMPLER_COUNT; i++)
 	{
@@ -2721,6 +2791,12 @@ GLMContext::GLMContext( IDirect3DDevice9 *pDevice, GLMDisplayParams *params )
 	m_nTotalPSUniformCalls = 0;
 	m_nTotalPSUniformsSet = 0;
 #endif
+
+	// See g_D3DRS_INFO_packed in dxabstract.cpp; dithering is a non-managed
+	// piece of state that we consider off by default. However it is actually
+	// enabled by default in the GL spec, so account for that here.
+	// See: https://bugs.freedesktop.org/show_bug.cgi?id=74700
+	gGL->glDisable( GL_DITHER );
 }
 
 void GLMContext::Reset()
@@ -2729,11 +2805,23 @@ void GLMContext::Reset()
 
 GLMContext::~GLMContext	()
 {
+#ifndef OSX
 	GLMGPUTimestampManagerDeinit();
 		
 	for ( uint t = 0; t < cNumPinnedMemoryBuffers; t++ )
 	{
 		m_PinnedMemoryBuffers[t].Deinit();
+	}
+
+	if (gGL->m_bHave_GL_ARB_buffer_storage)
+	{
+		for (uint lpType = 0; lpType < kGLMNumBufferTypes; ++lpType)
+		{
+			for (uint lpNum = 0; lpNum < cNumPersistentBuffers; ++lpNum)
+			{
+				m_persistentBuffer[lpNum][lpType].Deinit();
+			}
+		}
 	}
 
 	if ( m_bUseSamplerObjects )
@@ -2742,14 +2830,15 @@ GLMContext::~GLMContext	()
 		{
 			gGL->glBindSampler( i, 0 );
 		}
+
+		for( int i=0; i< cSamplerObjectHashSize; i++)
+		{
+			gGL->glDeleteSamplers( 1, &m_samplerObjectHash[i].m_samplerObject );
+			m_samplerObjectHash[i].m_samplerObject = 0;
+		}
 	}
-	
-	for( int i=0; i< cSamplerObjectHashSize; i++)
-	{
-		gGL->glDeleteSamplers( 1, &m_samplerObjectHash[i].m_samplerObject );
-		m_samplerObjectHash[i].m_samplerObject = 0;
-	}
-			
+#endif // !OSX
+
 	if (m_debugFontTex)
 	{
 		DelTex( m_debugFontTex );
@@ -2881,7 +2970,7 @@ void GLMContext::BindBufferToCtx( EGLMBufferType type, CGLMBuffer *pBuff, bool b
 
 	CheckCurrent();
 
-	GLuint nGLName = pBuff ? pBuff->m_nHandle : 0;
+	GLuint nGLName = pBuff ? pBuff->GetHandle() : 0;
 	if ( !bForce ) 
 	{
 		if ( m_nBoundGLBuffer[type] == nGLName )
@@ -4791,6 +4880,8 @@ static inline uint GetDataTypeSizeInBytes( GLenum dataType )
 	return 0;
 }
 
+#ifndef OSX
+
 void GLMContext::DrawRangeElementsNonInline( GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const GLvoid *indices, uint baseVertex, CGLMBuffer *pIndexBuf )
 {
 #if GLMDEBUG
@@ -4809,6 +4900,10 @@ void GLMContext::DrawRangeElementsNonInline( GLenum mode, GLuint start, GLuint e
 	{
 		// you have to pass actual address, not offset
 		indicesActual = (void*)( (int)indicesActual + (int)pIndexBuf->m_pPseudoBuf );
+	}
+	if (pIndexBuf->m_bUsingPersistentBuffer)
+	{
+		indicesActual = (void*)( (int)indicesActual + (int)pIndexBuf->m_nPersistentBufferStartOffset );
 	}
 
 #if GL_ENABLE_INDEX_VERIFICATION
@@ -4897,6 +4992,106 @@ void GLMContext::DrawRangeElementsNonInline( GLenum mode, GLuint start, GLuint e
 #endif
 	}
 }
+
+#else
+
+// support for OSX 10.6 (no support for glDrawRangeElementsBaseVertex)
+void GLMContext::DrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const GLvoid *indices, CGLMBuffer *pIndexBuf)
+{
+	GLM_FUNC;
+
+	//	CheckCurrent();
+	++m_nBatchCounter;				// batch index increments unconditionally on entry
+
+	SetIndexBuffer( pIndexBuf );
+	void *indicesActual = (void*)indices;    
+	if ( pIndexBuf->m_bPseudo )
+	{
+		// you have to pass actual address, not offset
+		indicesActual = (void*)( (int)indicesActual + (int)pIndexBuf->m_pPseudoBuf );
+	} 
+	if (pIndexBuf->m_bUsingPersistentBuffer)
+	{
+		indicesActual = (void*)( (int)indicesActual + (int)pIndexBuf->m_nPersistentBufferStartOffset );
+	}
+
+#if GLMDEBUG
+	// init debug hook information
+	GLMDebugHookInfo info;
+	memset(&info, 0, sizeof(info));
+	info.m_caller = eDrawElements;
+
+	// relay parameters we're operating under
+	info.m_drawMode = mode;
+	info.m_drawStart = start;
+	info.m_drawEnd = end;
+	info.m_drawCount = count;
+	info.m_drawType = type;
+	info.m_drawIndices = indices;
+
+	do
+	{
+		// obey global options re pre-draw clear
+		if (m_autoClearColor || m_autoClearDepth || m_autoClearStencil)
+		{
+			GLMPRINTF(("-- DrawRangeElements auto clear"));
+			this->DebugClear();
+		}
+
+		// always sync with editable shader text prior to draw
+#if GLMDEBUG
+		// TODO - fixup OSX 10.6 m_boundProg not used in this version togl (m_pBoundPair)
+		//FIXME disengage this path if context is in GLSL mode..
+		// it will need fixes to get the shader pair re-linked etc if edits happen anyway.
+
+		if (m_boundProgram[kGLMVertexProgram])
+		{
+			m_boundProgram[kGLMVertexProgram]->SyncWithEditable();
+		}
+		else
+		{
+			AssertOnce(!"drawing with no vertex program bound");
+		}
+
+		if (m_boundProgram[kGLMFragmentProgram])
+		{
+			m_boundProgram[kGLMFragmentProgram]->SyncWithEditable();
+		}
+		else
+		{
+			AssertOnce(!"drawing with no fragment program bound");
+		}
+#endif
+
+		// do the drawing
+		if ( m_pBoundPair )    
+		{
+			gGL->glDrawRangeElements(mode, start, end, count, type, indicesActual);
+			// GLMCheckError();
+
+			if (m_slowCheckEnable)
+			{
+				CheckNative();
+			}
+		}
+		this->DebugHook(&info);
+	} while (info.m_loop);
+#else
+	if ( m_pBoundPair )
+	{
+		gGL->glDrawRangeElements(mode, start, end, count, type, indicesActual);
+
+#if GLMDEBUG
+		if ( m_slowCheckEnable )
+		{
+			CheckNative();
+		}
+#endif
+	}
+#endif
+}
+
+#endif // !OSX
 
 #if 0
 // helper function to do enable or disable in one step
@@ -5543,7 +5738,7 @@ void GLMTester::Test2( void )
 	for( int i=0; i<m_params.m_frameCount; i++)
 	{
 		// ramping shades of blue...
-		GLfloat clear_color[4] = { 0.50f, 0.05f, ((float)(i%100)) / 100.0, 1.0f };		
+		GLfloat clear_color[4] = { 0.50f, 0.05f, ((float)(i%100)) / 100.0f, 1.0f };		
 		gGL->glClearColor(clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
 		CheckGLError("test2 clear color");
 

@@ -35,7 +35,9 @@
 
 #ifdef OSX
 #include <OpenGL/OpenGL.h>
+#ifdef CGLPROFILER_ENABLE
 #include <OpenGL/CGLProfilerFunctionEnum.h>
+#endif
 #endif
 
 #include "tier0/valve_minmax_off.h"
@@ -2601,7 +2603,7 @@ const char	*GLMDecodeMask( GLMThing_t kind, unsigned long value )
 bool	GLMDetectOGLP( void )
 {
 	bool result = false;
-#ifdef OSX
+#if defined( OSX ) && defined( CGLPROFILER_ENABLE )
 	GLint forceFlush;
 	CGLError error = CGLGetParameter(CGLGetCurrentContext(), kCGLCPEnableForceFlush, &forceFlush);
 	result = error == 0;
@@ -2807,7 +2809,7 @@ uint	GLMDebugFlavorMask( uint *newValue )
 void GLMEnableTrace( bool on )
 {
 #if GLMDEBUG
-#ifdef OSX
+#if defined( OSX ) && defined( CGLPROFILER_ENABLE )
 	if ( GLMDebugChannelMask() & (1<<eGLProfiler) )
 	{
 		CGLSetOption(kCGLGOEnableFunctionTrace, on ? GL_TRUE : GL_FALSE );
@@ -2833,7 +2835,7 @@ void	GLMStringOut( char *string )
 #endif
 	}
 
-#ifdef OSX
+#if defined( OSX ) && defined( CGLPROFILER_ENABLE )
 	if ( GLMDebugChannelMask() & (1<<eGLProfiler) )
 	{
 		CGLSetOption( kCGLGOComment, (GLint)string );
@@ -3106,36 +3108,11 @@ void	GLMSetIndent( int indent )
 
 #endif
 
-
-inline uint64 Plat_Rdtsc()
-{
-#if defined( _X360 )
-	return ( uint64 )__mftb32();
-#elif defined( _WIN64 )
-	return ( uint64 )__rdtsc();
-#elif defined( _WIN32 )
-  #if defined( _MSC_VER ) && ( _MSC_VER >= 1400 )
-	return ( uint64 )__rdtsc();
-  #else
-    __asm rdtsc;
-	__asm ret;
-  #endif
-#elif defined( __i386__ )
-	uint64 val;
-	__asm__ __volatile__ ( "rdtsc" : "=A" (val) );
-	return val;
-#elif defined( __x86_64__ )
-	uint32 lo, hi;
-	__asm__ __volatile__ ( "rdtsc" : "=a" (lo), "=d" (hi));
-	return ( ( ( uint64 )hi ) << 32 ) | lo;
-#else
-	#error
-#endif
-}
-
 // PIX tracking - you can call these outside of GLMDEBUG=true
 char sg_pPIXName[128];
 
+
+#ifndef OSX
 ConVar gl_telemetry_gpu_pipeline_flushing( "gl_telemetry_gpu_pipeline_flushing", "0" );
 
 class CGPUTimestampManager
@@ -3439,7 +3416,7 @@ public:
 		COMPILE_TIME_ASSERT( ( int )cMaxQueryZones > ( int )cMaxQueryZoneStackSize );
 		if ( m_nNumOutstandingQueryZones >= ( cMaxQueryZones - cMaxQueryZoneStackSize ) )
 		{
-			TM_MESSAGE( TELEMETRY_LEVEL2, TMMF_ICON_NOTE | TMMF_SEVERITY_WARNING, "CGPUTimestampManager::EndZone: Too many outstanding query zones - forcing a pipeline flush! This is probably expensive." );
+			tmMessage( TELEMETRY_LEVEL2, TMMF_ICON_NOTE | TMMF_SEVERITY_WARNING, "CGPUTimestampManager::EndZone: Too many outstanding query zones - forcing a pipeline flush! This is probably expensive." );
 
 			FlushOutstandingQueries( true );
 		}
@@ -3464,14 +3441,14 @@ public:
 
 		FlushOutstandingQueries( false );
 
-		TM_MESSAGE( TELEMETRY_LEVEL2, 0, "Total PIX timespan GPU work count: %u", m_nTotalSpanWorkCount );
+		tmMessage( TELEMETRY_LEVEL2, 0, "Total PIX timespan GPU work count: %u", m_nTotalSpanWorkCount );
 		
 		m_nTotalSpanWorkCount = 0;
 	}
 
 	void FlushOutstandingQueries( bool bForce )
 	{
-		TM_ZONE( TELEMETRY_LEVEL2, 0, "FlushOutstandingQueries: %u", m_nNumOutstandingQueryZones );
+		tmZone( TELEMETRY_LEVEL2, 0, "FlushOutstandingQueries: %u", m_nNumOutstandingQueryZones );
 
 		if ( bForce )
 		{
@@ -3611,12 +3588,12 @@ private:
 
 		for ( uint i = 0; i < 10; i++ )
 		{
-			TmU64 t0 = Plat_Rdtsc();
+			uint64 t0 = Plat_Rdtsc();
 			double d0 = Plat_FloatTime();
 
 			ThreadSleep( 250 );
 
-			TmU64 t1 = Plat_Rdtsc();
+			uint64 t1 = Plat_Rdtsc();
 			double d1 = Plat_FloatTime();
 
 			double flRdtscToS = ( d1 - d0 ) / ( t1 - t0 );
@@ -3631,23 +3608,21 @@ private:
 
 	void PipelineFlush()
 	{
+#ifdef HAVE_GL_ARB_SYNC
 		GLsync nSyncObj = gGL->glFenceSync( GL_SYNC_GPU_COMMANDS_COMPLETE, 0 );
 		if ( nSyncObj )
 		{
 			gGL->glClientWaitSync( nSyncObj, GL_SYNC_FLUSH_COMMANDS_BIT, 300000000000ULL );
 			gGL->glDeleteSync( nSyncObj );
 		}
+#endif
 	}
 
 	inline void NewTimeSpan( uint64 nStartGPUTime, uint64 nEndGPUTime, const char *pName, uint nTotalDraws )
 	{
-		// 7LS - telemetry define off, so need this ifdef here to build
-#if defined( RAD_TELEMETRY_ENABLED ) 
-
 		// apparently we must use level0 for timespans?
 		tmBeginTimeSpanAt( TELEMETRY_LEVEL0, 1, 0, nStartGPUTime, "%s [C:%u]", pName ? pName : "", nTotalDraws );
 		tmEndTimeSpanAt( TELEMETRY_LEVEL0, 1, 0, nEndGPUTime, "%s [C:%u]", pName ? pName : "", nTotalDraws );
-#endif
 	}
 
 	void FlushFinishedZones()
@@ -3702,6 +3677,7 @@ private:
 	}
 };
 
+
 static CGPUTimestampManager g_GPUTimestampManager;
 
 void GLMGPUTimestampManagerInit()
@@ -3738,22 +3714,25 @@ void GLMGPUTimestampManagerTick()
 	g_GPUTimestampManager.Tick();
 }
 
+#endif // !OSX
+
 static uint g_nPIXEventIndex;
 
 void GLMBeginPIXEvent( const char *str )
 {
+#ifndef OSX
 	char szName[1024];
 	V_snprintf( szName, sizeof( szName ), "[ID:%u FR:%u] %s", g_nPIXEventIndex, g_GPUTimestampManager.GetCurFrame(), str );
 	const char *p = tmDynamicString( TELEMETRY_LEVEL2, szName ); //p can be null if tm is getting shut down
-	TM_ENTER( TELEMETRY_LEVEL2, TMZF_NONE, "PIX %s", p ? p : ""  );
+	tmEnter( TELEMETRY_LEVEL2, TMZF_NONE, "PIX %s", p ? p : ""  );
 
 	g_nPIXEventIndex++;
 			
 	g_GPUTimestampManager.BeginZone( p );
-
+#endif // !OSX
 	V_strncpy( sg_pPIXName, str, 128 );
 
-#ifdef OSX
+#if defined( OSX ) && defined( CGLPROFILER_ENABLE )
 	CGLSetOption( kCGLGOComment, (GLint)sg_pPIXName );
 #endif
 
@@ -3765,9 +3744,11 @@ void GLMBeginPIXEvent( const char *str )
 
 void GLMEndPIXEvent( void )
 {
+#ifndef OSX
 	g_GPUTimestampManager.EndZone();
-		
-#ifdef OSX
+#endif
+
+#if defined( OSX ) && defined( CGLPROFILER_ENABLE )
 	CGLSetOption( kCGLGOComment, (GLint)sg_pPIXName );
 #endif
 
@@ -3778,7 +3759,7 @@ void GLMEndPIXEvent( void )
 
 	sg_pPIXName[0] = '\0';
 		
-	TM_LEAVE( TELEMETRY_LEVEL2 );
+	tmLeave( TELEMETRY_LEVEL2 );
 }
 
 //===============================================================================
@@ -3921,30 +3902,30 @@ float	GLMKnobToggle( char *knobname )
 // helpers for CGLSetOption - no op if no profiler
 void	GLMProfilerClearTrace( void )
 {
-#ifdef OSX
+#if defined( OSX ) && defined( CGLPROFILER_ENABLE )
 	CGLSetOption( kCGLGOResetFunctionTrace, 0 );
 #else
-		Assert( !"impl me" );
+	Assert( !"impl me" );
 #endif
 }
 
 void	GLMProfilerEnableTrace( bool enable )
 {
-#ifdef OSX
+#if defined( OSX ) && defined( CGLPROFILER_ENABLE )
 	CGLSetOption( kCGLGOEnableFunctionTrace, enable ? GL_TRUE : GL_FALSE );
 #else
-		Assert( !"impl me" );
+	Assert( !"impl me" );
 #endif
 }
 
 // helpers for CGLSetParameter - no op if no profiler
 void	GLMProfilerDumpState( void )
 {
-#ifdef OSX
+#if defined( OSX ) && defined( CGLPROFILER_ENABLE )
 	CGLContextObj curr = CGLGetCurrentContext();
 	CGLSetParameter( curr, kCGLCPDumpState, (const GLint*)1 );
 #else
-		Assert( !"impl me" );
+	Assert( !"impl me" );
 #endif
 }
 

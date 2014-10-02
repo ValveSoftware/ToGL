@@ -30,7 +30,8 @@
 
 #include "filesystem.h"
 #include "tier1/fmtstr.h"
-#include "tier1/keyvalues.h"
+#include "tier1/KeyValues.h"
+#include "tier0/fasttimer.h"
 
 #if GLMDEBUG && defined( _MSC_VER )
 #include <direct.h>
@@ -45,6 +46,18 @@
 ConVar	gl_shaderpair_cacherows_lg2( "gl_paircache_rows_lg2", "10");		// 10 is minimum
 ConVar	gl_shaderpair_cacheways_lg2( "gl_paircache_ways_lg2", "5");		// 5 is minimum
 ConVar	gl_shaderpair_cachelog( "gl_shaderpair_cachelog", "0" );
+
+static CCycleCount	gShaderCompileTime;
+static int			gShaderCompileCount = 0;
+static CCycleCount	gShaderCompileQueryTime;
+static CCycleCount	gShaderLinkTime;
+static int			gShaderLinkCount = 0;
+static CCycleCount	gShaderLinkQueryTime;
+CON_COMMAND( gl_shader_compile_time_dump, "Dump  stats shader compile time." )
+{
+	ConMsg( "Shader Compile Time: %u ms (Count: %d) / Query: %u ms \n", (uint32)gShaderCompileTime.GetMilliseconds(), gShaderCompileCount, (uint32)gShaderCompileQueryTime.GetMilliseconds() );
+	ConMsg( "Shader Link Time   : %u ms (Count: %d) / Query: %u ms \n", (uint32)gShaderLinkTime.GetMilliseconds(), gShaderLinkCount, (uint32)gShaderLinkQueryTime.GetMilliseconds() );
+}
 
 //===============================================================================
 
@@ -301,27 +314,28 @@ void	CGLMProgram::SetProgramText( char *text )
 	}
 }
 
-bool	CGLMProgram::CompileActiveSources	( void )
+void	CGLMProgram::CompileActiveSources	( void )
 {
-	bool result = true;	// assume success
-	
 	// compile everything we have text for
 	for( int i=0; i<kGLMNumProgramTypes; i++)
 	{
 		if (m_descs[i].m_textPresent)
 		{
-			if (!Compile( (EGLMProgramLang)i ))
-			{
-				result = false;
-			}
+			Compile( (EGLMProgramLang)i );
 		}
 	}
-	return result;
 }
 
-bool	CGLMProgram::Compile( EGLMProgramLang lang )
+void	CGLMProgram::Compile( EGLMProgramLang lang )
 {
-	bool result = true;	// indicating validity..
+	bool bTimeShaderCompiles = (CommandLine()->FindParm( "-gl_time_shader_compiles" ) != 0);
+	// If using "-gl_time_shader_compiles", keeps track of total cycle count spent on shader compiles.
+	CFastTimer shaderCompileTimer;
+	if (bTimeShaderCompiles)
+	{
+		shaderCompileTimer.Start();
+	}
+	
 	bool noisy = false; noisy;
 	int loglevel = gl_shaderpair_cachelog.GetInt();
 	
@@ -371,8 +385,6 @@ bool	CGLMProgram::Compile( EGLMProgramLang lang )
 			
 			CheckValidity( lang );
 			// leave it bound n enabled, don't care (draw will sort it all out)
-
-			result = arbDesc->m_valid;
 		}
 		break;
 
@@ -427,7 +439,14 @@ bool	CGLMProgram::Compile( EGLMProgramLang lang )
 			gGL->glCompileShaderARB( glslDesc->m_object.glsl );
 			glslDesc->m_compiled = true;	// compiled but not necessarily valid
 
-			CheckValidity( lang );
+			// Check shader validity at creation time.  This will cause the driver to not be able to
+			// multi-thread/defer shader compiles, but it is useful for getting error messages on the
+			// shader when it is compiled
+			bool bValidateShaderEarly = (CommandLine()->FindParm( "-gl_validate_shader_early" ) != 0);
+			if (bValidateShaderEarly)
+			{
+				CheckValidity( lang );
+			}
 
 			if (loglevel>=2)
 			{
@@ -442,12 +461,16 @@ bool	CGLMProgram::Compile( EGLMProgramLang lang )
 				GetComboIndexNameString( tempname, sizeof(tempname) );
 				printf("\ncompile: %s on GL name %d ", tempname, glslDesc->m_object.glsl );
 			}
-
-			result = glslDesc->m_valid;
 		}
 		break;
 	}
-	return result;
+
+	if (bTimeShaderCompiles)
+	{
+		shaderCompileTimer.End();
+		gShaderCompileTime += shaderCompileTimer.GetDuration();
+		gShaderCompileCount++;
+	}
 }
 
 #if GLMDEBUG
@@ -598,6 +621,16 @@ bool CGLMProgram::CheckValidity( EGLMProgramLang lang )
 {
 	static char *targnames[] = { "vertex", "fragment" };
 
+	bool bTimeShaderCompiles = (CommandLine()->FindParm( "-gl_time_shader_compiles" ) != 0);
+	// If using "-gl_time_shader_compiles", keeps track of total cycle count spent on shader compiles.
+	CFastTimer shaderCompileTimer;
+	if (bTimeShaderCompiles)
+	{
+		shaderCompileTimer.Start();
+	}
+
+	bool bValid = false;
+
 	switch(lang)
 	{
 		case kGLMARB:
@@ -663,7 +696,7 @@ bool CGLMProgram::CheckValidity( EGLMProgramLang lang )
 				free( temp );
 			}
 			
-			return arbDesc->m_valid;
+			bValid = arbDesc->m_valid;
 		}
 		break;
 		
@@ -709,12 +742,25 @@ bool CGLMProgram::CheckValidity( EGLMProgramLang lang )
             if ( logString )
                 free( logString );
 
-			return glslDesc->m_valid;
+			bValid = glslDesc->m_valid;
 		}
 		break;
 	}
 
-	return false;
+	if ( !bValid )
+	{
+		GLMDebugPrintf( "Compile of \"%s\" Failed:\n", m_shaderName );
+		Plat_DebugString( m_text );
+	}
+	AssertOnce( bValid );
+
+	if (bTimeShaderCompiles)
+	{
+		shaderCompileTimer.End();
+		gShaderCompileQueryTime += shaderCompileTimer.GetDuration();
+	}
+
+	return bValid;
 }
 
 void	CGLMProgram::LogSlow( EGLMProgramLang lang )
@@ -862,6 +908,7 @@ CGLMShaderPair::CGLMShaderPair( GLMContext *ctx  )
 	memset( m_locSamplers, 0xFF, sizeof( m_locSamplers ) );
 	
 	m_valid = false;
+	m_bCheckLinkStatus = false;
 	m_revision = 0;				// bumps to 1 once linked
 }
 
@@ -874,14 +921,204 @@ CGLMShaderPair::~CGLMShaderPair( )
 	}
 }
 
+bool CGLMShaderPair::ValidateProgramPair()
+{
+	if ( m_vertexProg && m_vertexProg->m_descs[kGLMGLSL].m_textPresent && !m_vertexProg->m_descs[kGLMGLSL].m_valid )
+	{
+		m_vertexProg->CheckValidity( kGLMGLSL );
+	}
+	if (m_fragmentProg && m_fragmentProg->m_descs[kGLMGLSL].m_textPresent && !m_fragmentProg->m_descs[kGLMGLSL].m_valid)
+	{
+		m_fragmentProg->CheckValidity( kGLMGLSL );
+	}
+	
+	if ( !m_valid && m_bCheckLinkStatus )
+	{
+		bool bTimeShaderCompiles = (CommandLine()->FindParm( "-gl_time_shader_compiles" ) != 0);
+		// If using "-gl_time_shader_compiles", keeps track of total cycle count spent on shader compiles.
+		CFastTimer shaderCompileTimer;
+		if (bTimeShaderCompiles)
+		{
+			shaderCompileTimer.Start();
+		}
+
+		// check for success
+		GLint result = 0;
+		gGL->glGetObjectParameterivARB( m_program, GL_OBJECT_LINK_STATUS_ARB, &result );	// want GL_TRUE
+		m_bCheckLinkStatus = false;
+
+		if (result == GL_TRUE)
+		{
+			// success
+
+			m_valid = true;
+			m_revision++;
+		}
+		else
+		{
+			GLint length = 0;
+			GLint laux = 0;
+
+			// do some digging
+			gGL->glGetObjectParameterivARB( m_program, GL_OBJECT_INFO_LOG_LENGTH_ARB, &length );
+
+			GLcharARB *logString = (GLcharARB *)malloc( length * sizeof(GLcharARB) );
+			gGL->glGetInfoLogARB( m_program, length, &laux, logString );
+
+			char *vtemp = strdup( m_vertexProg->m_text );
+			vtemp[m_vertexProg->m_descs[kGLMGLSL].m_textOffset + m_vertexProg->m_descs[kGLMGLSL].m_textLength] = 0;
+
+			char *ftemp = strdup( m_fragmentProg->m_text );
+			ftemp[m_fragmentProg->m_descs[kGLMGLSL].m_textOffset + m_fragmentProg->m_descs[kGLMGLSL].m_textLength] = 0;
+
+			GLMPRINTF( ("-D- ----- GLSL link failed: \n %s ", logString) );
+
+			GLMPRINTF( ("-D- ----- GLSL vertex program selected: %08x (handle %08x)", m_vertexProg, m_vertexProg->m_descs[kGLMGLSL].m_object.glsl) );
+			GLMPRINTTEXT( (vtemp + m_vertexProg->m_descs[kGLMGLSL].m_textOffset, eDebugDump, GLMPRINTTEXT_NUMBEREDLINES) );
+
+			GLMPRINTF( ("-D- ----- GLSL fragment program selected: %08x (handle %08x)", m_fragmentProg, m_vertexProg->m_descs[kGLMGLSL].m_object.glsl) );
+			GLMPRINTTEXT( (ftemp + m_fragmentProg->m_descs[kGLMGLSL].m_textOffset, eDebugDump, GLMPRINTTEXT_NUMBEREDLINES) );
+
+			GLMPRINTF( ("-D- -----end-----") );
+
+			free( ftemp );
+			free( vtemp );
+			free( logString );
+		}
+
+		if (m_valid)
+		{
+			gGL->glUseProgram( m_program );
+
+			m_ctx->NewLinkedProgram();
+
+			m_locVertexParams = gGL->glGetUniformLocationARB( m_program, "vc" );
+			m_locVertexBoneParams = gGL->glGetUniformLocationARB( m_program, "vcbones" );
+			m_locVertexScreenParams = gGL->glGetUniformLocationARB( m_program, "vcscreen" );
+			m_nScreenWidthHeight = 0xFFFFFFFF;
+
+			m_locVertexInteger0 = gGL->glGetUniformLocationARB( m_program, "i0" );
+
+			m_bHasBoolOrIntUniforms = false;
+			if (m_locVertexInteger0 >= 0)
+				m_bHasBoolOrIntUniforms = true;
+
+			for (uint i = 0; i < cMaxVertexShaderBoolUniforms; i++)
+			{
+				char buf[256];
+				V_snprintf( buf, sizeof(buf), "b%d", i );
+				m_locVertexBool[i] = gGL->glGetUniformLocationARB( m_program, buf );
+				if (m_locVertexBool[i] != -1)
+					m_bHasBoolOrIntUniforms = true;
+			}
+
+			for (uint i = 0; i < cMaxFragmentShaderBoolUniforms; i++)
+			{
+				char buf[256];
+				V_snprintf( buf, sizeof(buf), "fb%d", i );
+				m_locFragmentBool[i] = gGL->glGetUniformLocationARB( m_program, buf );
+				if (m_locFragmentBool[i] != -1)
+					m_bHasBoolOrIntUniforms = true;
+			}
+
+			m_locFragmentParams = gGL->glGetUniformLocationARB( m_program, "pc" );
+
+			for (uint i = 0; i < kGLMNumProgramTypes; i++)
+			{
+				m_NumUniformBufferParams[i] = 0;
+
+				if (i == kGLMVertexProgram)
+				{
+					if (m_locVertexParams < 0)
+						continue;
+				}
+				else if (m_locFragmentParams < 0)
+					continue;
+
+				const uint nNum = (i == kGLMVertexProgram) ? m_vertexProg->m_descs[kGLMGLSL].m_highWater : m_fragmentProg->m_descs[kGLMGLSL].m_highWater;
+
+				uint j;
+				for (j = 0; j < nNum; j++)
+				{
+					char buf[256];
+					V_snprintf( buf, sizeof(buf), "%cc[%i]", "vp"[i], j );
+					// Grab the handle of each array element, so we can more efficiently update array elements in the middle.
+					int l = m_UniformBufferParams[i][j] = gGL->glGetUniformLocationARB( m_program, buf );
+					if (l < 0)
+						break;
+				}
+
+				m_NumUniformBufferParams[i] = j;
+			}
+
+			m_locFragmentFakeSRGBEnable = gGL->glGetUniformLocationARB( m_program, "flSRGBWrite" );
+			m_fakeSRGBEnableValue = -1.0f;
+
+			for (int sampler = 0; sampler < 16; sampler++)
+			{
+				char tmp[16];
+				sprintf( tmp, "sampler%d", sampler );	// sampler0 .. sampler1.. etc
+
+				GLint nLoc = gGL->glGetUniformLocationARB( m_program, tmp );
+				m_locSamplers[sampler] = nLoc;
+				if (nLoc >= 0)
+				{
+					gGL->glUniform1iARB( nLoc, sampler );
+				}
+			}
+		}
+		else
+		{
+			m_locVertexParams = -1;
+			m_locVertexBoneParams = -1;
+			m_locVertexScreenParams = -1;
+			m_nScreenWidthHeight = 0xFFFFFFFF;
+
+			m_locVertexInteger0 = -1;
+			memset( m_locVertexBool, 0xFF, sizeof(m_locVertexBool) );
+			memset( m_locFragmentBool, 0xFF, sizeof(m_locFragmentBool) );
+			m_bHasBoolOrIntUniforms = false;
+
+			m_locFragmentParams = -1;
+			m_locFragmentFakeSRGBEnable = -1;
+			m_fakeSRGBEnableValue = -999;
+
+			memset( m_locSamplers, 0xFF, sizeof(m_locSamplers) );
+
+			m_revision = 0;
+		}
+
+		if (bTimeShaderCompiles)
+		{
+			shaderCompileTimer.End();
+			gShaderLinkQueryTime += shaderCompileTimer.GetDuration();
+		}
+	}
+	
+	return m_valid;
+}
+
 // glUseProgram() will be called as a side effect!
 bool CGLMShaderPair::SetProgramPair( CGLMProgram *vp, CGLMProgram *fp )
 {
+	bool bTimeShaderCompiles = (CommandLine()->FindParm( "-gl_time_shader_compiles" ) != 0);
+	// If using "-gl_time_shader_compiles", keeps track of total cycle count spent on shader compiles.
+	CFastTimer shaderCompileTimer;
+	if (bTimeShaderCompiles)
+	{
+		shaderCompileTimer.Start();
+	}
+	
 	m_valid	= false;			// assume failure
 	
-	// true result means successful link and query
-	bool vpgood = (vp!=NULL) && (vp->m_descs[ kGLMGLSL ].m_valid);
-	bool fpgood = (fp!=NULL) && (fp->m_descs[ kGLMGLSL ].m_valid);
+	// No need to check that vp and fp are valid at this point (ie shader compile succeed)
+	// It is permissible to attach a shader object to a program before source code has been loaded
+	// into the shader object or before the shader object has been compiled. The program won't 
+	// link if one or more of the shader objects has not been successfully compiled.
+	// (Defer querying the compile and link status to take advantage of GLSL shaders
+	// building in parallels)
+	bool vpgood = (vp != NULL);
+	bool fpgood = (fp != NULL);
 	
 	if ( !fpgood )
 	{
@@ -922,15 +1159,12 @@ bool CGLMShaderPair::SetProgramPair( CGLMProgram *vp, CGLMProgram *fp )
 		// use the vertex attrib map to know which slots are live or not... oy!  we don't have that map yet... but it's OK.
 		// fallback - just force v0-v15 to land in locations 0-15 as a standard.
 		
-		if ( vp->m_descs[kGLMGLSL].m_valid )
+		for( int i = 0; i < 16; i++ )
 		{
-			for( int i = 0; i < 16; i++ )
-			{
-				char tmp[16];
-				sprintf(tmp, "v%d", i);	// v0 v1 v2 ... et al
+			char tmp[16];
+			sprintf(tmp, "v%d", i);	// v0 v1 v2 ... et al
 				
-				gGL->glBindAttribLocationARB( m_program, i, tmp );
-			}
+			gGL->glBindAttribLocationARB( m_program, i, tmp );
 		}
 
 		if (CommandLine()->CheckParm("-dumpallshaders"))
@@ -947,49 +1181,7 @@ bool CGLMShaderPair::SetProgramPair( CGLMProgram *vp, CGLMProgram *fp )
 			
 		// now link
 		gGL->glLinkProgramARB( m_program );
-
-		// check for success
-		GLint result = 0;
-		gGL->glGetObjectParameterivARB(m_program,GL_OBJECT_LINK_STATUS_ARB,&result);	// want GL_TRUE
-		
-		if (result == GL_TRUE)
-		{
-			// success
-			
-			m_valid	= true;
-			m_revision++;
-		}
-		else
-		{
-			GLint length = 0;
-			GLint laux = 0;
-			
-			// do some digging
-			gGL->glGetObjectParameterivARB(m_program,GL_OBJECT_INFO_LOG_LENGTH_ARB,&length);
-
-			GLcharARB *logString = (GLcharARB *)malloc(length * sizeof(GLcharARB));
-			gGL->glGetInfoLogARB(m_program, length, &laux, logString);	
-
-			char *vtemp = strdup(vp->m_text);
-			vtemp[ vp->m_descs[kGLMGLSL].m_textOffset + vp->m_descs[kGLMGLSL].m_textLength ] = 0;
-			
-			char *ftemp = strdup(fp->m_text);
-			ftemp[ fp->m_descs[kGLMGLSL].m_textOffset + fp->m_descs[kGLMGLSL].m_textLength ] = 0;
-			
-			GLMPRINTF(("-D- ----- GLSL link failed: \n %s ",logString ));
-
-			GLMPRINTF(("-D- ----- GLSL vertex program selected: %08x (handle %08x)", vp, vp->m_descs[kGLMGLSL].m_object.glsl ));
-			GLMPRINTTEXT(( vtemp + vp->m_descs[kGLMGLSL].m_textOffset, eDebugDump, GLMPRINTTEXT_NUMBEREDLINES ));
-			
-			GLMPRINTF(("-D- ----- GLSL fragment program selected: %08x (handle %08x)", fp, vp->m_descs[kGLMGLSL].m_object.glsl ));
-			GLMPRINTTEXT(( ftemp + fp->m_descs[kGLMGLSL].m_textOffset, eDebugDump, GLMPRINTTEXT_NUMBEREDLINES ));
-			
-			GLMPRINTF(("-D- -----end-----" ));
-
-			free( ftemp );
-			free( vtemp );
-			free( logString );
-		}
+		m_bCheckLinkStatus = true;
 	}
 	else
 	{
@@ -997,106 +1189,20 @@ bool CGLMShaderPair::SetProgramPair( CGLMProgram *vp, CGLMProgram *fp )
 		Assert(!"Can't link these programs");
 	}
 
-	if (m_valid)
+	// Check shader validity at creation time.  This will cause the driver to not be able to
+	// multi-thread/defer shader compiles, but it is useful for getting error messages on the
+	// shader when it is compiled
+	bool bValidateShaderEarly = (CommandLine()->FindParm( "-gl_validate_shader_early" ) != 0);
+	if (bValidateShaderEarly)
 	{
-		gGL->glUseProgram( m_program );
-
-		m_ctx->NewLinkedProgram();
-				
-		m_locVertexParams = gGL->glGetUniformLocationARB( m_program, "vc");
-		m_locVertexBoneParams = gGL->glGetUniformLocationARB( m_program, "vcbones");
-		m_locVertexScreenParams = gGL->glGetUniformLocationARB( m_program, "vcscreen");
-		m_nScreenWidthHeight = 0xFFFFFFFF;
-				
-		m_locVertexInteger0 = gGL->glGetUniformLocationARB( m_program, "i0");
-		
-		m_bHasBoolOrIntUniforms = false;
-		if ( m_locVertexInteger0 >= 0 )
-			m_bHasBoolOrIntUniforms = true;
-
-		for ( uint i = 0; i < cMaxVertexShaderBoolUniforms; i++ )
-		{
-			char buf[256];
-			V_snprintf( buf, sizeof(buf), "b%d", i );
-			m_locVertexBool[i] = gGL->glGetUniformLocationARB( m_program, buf );
-			if ( m_locVertexBool[i] != - 1 )
-				m_bHasBoolOrIntUniforms = true;
-		}
-
-		for ( uint i = 0; i < cMaxFragmentShaderBoolUniforms; i++ )
-		{
-			char buf[256];
-			V_snprintf( buf, sizeof(buf), "fb%d", i );
-			m_locFragmentBool[i] = gGL->glGetUniformLocationARB( m_program, buf );
-			if ( m_locFragmentBool[i] != - 1 )
-				m_bHasBoolOrIntUniforms = true;
-		}
-
- 		m_locFragmentParams = gGL->glGetUniformLocationARB( m_program, "pc");
-						
-		for (uint i = 0; i < kGLMNumProgramTypes; i++)
-		{
-			m_NumUniformBufferParams[i] = 0;
-
-			if (i == kGLMVertexProgram)
-			{
-				if (m_locVertexParams < 0)
-					continue;
-			}
-			else if (m_locFragmentParams < 0)
-				continue;
-
-			const uint nNum = (i == kGLMVertexProgram) ? m_vertexProg->m_descs[kGLMGLSL].m_highWater : m_fragmentProg->m_descs[kGLMGLSL].m_highWater;
-						
-			uint j;
-			for (j = 0; j < nNum; j++)
-			{
-				char buf[256];
-				V_snprintf(buf, sizeof(buf), "%cc[%i]", "vp"[i], j);
-				// Grab the handle of each array element, so we can more efficiently update array elements in the middle.
-				int l = m_UniformBufferParams[i][j] = gGL->glGetUniformLocationARB( m_program, buf );
-				if ( l < 0 )
-					break;
-			}
-			
-			m_NumUniformBufferParams[i] = j;
-		}
-		
- 		m_locFragmentFakeSRGBEnable = gGL->glGetUniformLocationARB( m_program, "flSRGBWrite");
-		m_fakeSRGBEnableValue = -1.0f;
-						
-		for( int sampler=0; sampler<16; sampler++)
-		{
-			char tmp[16];
-			sprintf(tmp, "sampler%d", sampler);	// sampler0 .. sampler1.. etc
-			
-			GLint nLoc = gGL->glGetUniformLocationARB( m_program, tmp );
-			m_locSamplers[sampler] = nLoc;
-			if ( nLoc >= 0 )
-			{
-				gGL->glUniform1iARB( nLoc, sampler );
-			}
-		}
+		ValidateProgramPair();
 	}
-	else
-	{
-		m_locVertexParams = -1;
-		m_locVertexBoneParams = -1;
-		m_locVertexScreenParams = -1;
-		m_nScreenWidthHeight = 0xFFFFFFFF;
 
-		m_locVertexInteger0 = -1;
-		memset( m_locVertexBool, 0xFF, sizeof( m_locVertexBool ) );
-		memset( m_locFragmentBool, 0xFF, sizeof( m_locFragmentBool ) );
-		m_bHasBoolOrIntUniforms = false;
-		
-		m_locFragmentParams = -1;
-		m_locFragmentFakeSRGBEnable = -1;
-		m_fakeSRGBEnableValue = -999;
-		
-		memset( m_locSamplers, 0xFF, sizeof( m_locSamplers ) );
-		
-		m_revision = 0;		
+	if (bTimeShaderCompiles)
+	{
+		shaderCompileTimer.End();
+		gShaderLinkTime += shaderCompileTimer.GetDuration();
+		gShaderLinkCount++;
 	}
 
 	return m_valid;

@@ -66,6 +66,51 @@ struct GLMBuffLockParams
 
 extern void glBufferSubDataMaxSize( GLenum target, GLintptr offset, GLsizeiptr size, const GLvoid *data, uint nMaxSizePerCall = 128 * 1024 );
 
+//===========================================================================//
+
+// Creates an immutable storage for a buffer object
+// https://www.opengl.org/registry/specs/ARB/buffer_storage.txt
+class CPersistentBuffer
+{
+public:
+
+	CPersistentBuffer();
+	~CPersistentBuffer();
+
+	void Init( EGLMBufferType type,uint nSize );
+	void Deinit();
+
+	void InsertFence();
+	void BlockUntilNotBusy();
+
+	void Append( uint nSize );
+
+	inline uint GetBytesRemaining() const { return m_nSize - m_nOffset; }
+	inline uint GetOffset() const { return m_nOffset; }
+	inline void *GetPtr() const { return m_pImmutablePersistentBuf; }
+	inline GLuint GetHandle() const { return m_nHandle; }
+
+private:
+
+	CPersistentBuffer( const CPersistentBuffer & );
+	CPersistentBuffer & operator= (const CPersistentBuffer &);
+
+	uint			m_nSize;
+
+	EGLMBufferType	m_type;
+	GLenum			m_buffGLTarget;			// GL_ARRAY_BUFFER_ARB / GL_ELEMENT_BUFFER_ARB	
+	GLuint			m_nHandle;				// handle of this program in the GL context
+
+	// Holds a pointer to the persistently mapped buffer
+	void*			m_pImmutablePersistentBuf;
+
+	uint			m_nOffset;
+
+#ifdef HAVE_GL_ARB_SYNC
+	GLsync			m_nSyncObj;
+#endif
+};
+
 //===============================================================================
 
 #if GL_ENABLE_INDEX_VERIFICATION
@@ -114,7 +159,7 @@ public:
 	void DiscardAllSpans();
 		
 	bool IsValid( uint nOffset, uint nSize ) const;
-		
+
 private:
 	bool AllocDynamicBuf( uint nSize, GLDynamicBuf_t &buf );
 	void ReleaseDynamicBuf( GLDynamicBuf_t &buf );
@@ -142,6 +187,8 @@ class CGLMBuffer
 public:
 	void Lock( GLMBuffLockParams *pParams, char **pAddressOut );
 	void Unlock( int nActualSize = -1, const void *pActualData = NULL );
+
+	GLuint GetHandle() const;
 		
 	friend class GLMContext;			// only GLMContext can make CGLMBuffer objects
 	friend class GLMTester;	
@@ -181,6 +228,9 @@ public:
 	float					*m_pLastMappedAddress;
 
 	int						m_nPinnedMemoryOfs;
+
+	uint					m_nPersistentBufferStartOffset;
+	bool					m_bUsingPersistentBuffer;
 	
 	bool					m_bPseudo;				// true if the m_name is 0, and the backing is plain RAM
 			

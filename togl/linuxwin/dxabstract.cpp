@@ -34,7 +34,9 @@
 #include "tier1/utlbuffer.h"
 #include "dx9asmtogl2.h"
 #include "mathlib/vmatrix.h"
-#include "materialsystem/ishader.h"
+#include "materialsystem/IShader.h"
+
+#include "glmgr_flush.inl"
 
 #if defined(OSX) || defined(LINUX) || (defined (WIN32) && defined( DX_TO_GL_ABSTRACTION ))
 	#include "appframework/ilaunchermgr.h"
@@ -1247,7 +1249,9 @@ HRESULT IDirect3D9::GetAdapterIdentifier( UINT Adapter, DWORD Flags, D3DADAPTER_
 	bool result = db->GetFakeAdapterInfo( Adapter, &glmRendererIndex, &glmDisplayIndex, &glmRendererInfo, &glmDisplayInfo ); (void)result;
 	Assert (!result);
 
+#ifndef OSX
 	if( glmRendererInfo.m_rendererID )
+#endif
 	{
 		const char *pRenderer = GLMDecode( eGL_RENDERER, glmRendererInfo.m_rendererID & 0x00FFFF00 );
 
@@ -1259,6 +1263,7 @@ HRESULT IDirect3D9::GetAdapterIdentifier( UINT Adapter, DWORD Flags, D3DADAPTER_
 			glmDisplayInfo.m_displayPixelWidth, glmDisplayInfo.m_displayPixelHeight,
 			glmRendererInfo.m_vidMemory >> 20 );
 	}
+#ifndef OSX
 	else
 	{
 		static CDynamicFunctionOpenGL< true, const GLubyte *( APIENTRY *)(GLenum name), const GLubyte * > glGetString("glGetString");
@@ -1273,6 +1278,7 @@ HRESULT IDirect3D9::GetAdapterIdentifier( UINT Adapter, DWORD Flags, D3DADAPTER_
 			pszStringVendor, pszStringRenderer, pszStringVersion,
 			glmDisplayInfo.m_displayPixelWidth, glmDisplayInfo.m_displayPixelHeight );
 	}
+#endif // !OSX
 
 	pIdentifier->VendorId				= glmRendererInfo.m_pciVendorID;	// 4318;
 	pIdentifier->DeviceId				= glmRendererInfo.m_pciDeviceID;	// 401;
@@ -1351,6 +1357,8 @@ HRESULT IDirect3D9::CheckDeviceFormat(UINT Adapter,D3DDEVTYPE DeviceType,D3DFORM
 													legalUsage |=	D3DUSAGE_RENDERTARGET | D3DUSAGE_QUERY_SRGBREAD | D3DUSAGE_QUERY_SRGBWRITE | D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING;
 						break;
 
+//$ TODO: Need to merge bitmap changes over from Dota to get these formats.
+#if 0
 						case D3DFMT_A2R10G10B10:	legalUsage	=	D3DUSAGE_DYNAMIC | D3DUSAGE_AUTOGENMIPMAP | D3DUSAGE_QUERY_FILTER;
 													legalUsage |=	D3DUSAGE_RENDERTARGET | D3DUSAGE_QUERY_SRGBREAD | D3DUSAGE_QUERY_SRGBWRITE | D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING;
 						break;
@@ -1358,6 +1366,7 @@ HRESULT IDirect3D9::CheckDeviceFormat(UINT Adapter,D3DDEVTYPE DeviceType,D3DFORM
 						case D3DFMT_A2B10G10R10:	legalUsage	=	D3DUSAGE_DYNAMIC | D3DUSAGE_AUTOGENMIPMAP | D3DUSAGE_QUERY_FILTER;
 													legalUsage |=	D3DUSAGE_RENDERTARGET | D3DUSAGE_QUERY_SRGBREAD | D3DUSAGE_QUERY_SRGBWRITE | D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING;
 						break;
+#endif
 
 						case D3DFMT_R32F:			legalUsage	=	D3DUSAGE_DYNAMIC | D3DUSAGE_AUTOGENMIPMAP | D3DUSAGE_QUERY_FILTER;
 													legalUsage |=	D3DUSAGE_RENDERTARGET | D3DUSAGE_QUERY_SRGBREAD | D3DUSAGE_QUERY_SRGBWRITE | D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING;
@@ -4377,6 +4386,17 @@ HRESULT IDirect3DDevice9::LinkShaderPair( IDirect3DVertexShader9* vs, IDirect3DP
 	return S_OK;
 }
 
+HRESULT IDirect3DDevice9::ValidateShaderPair( IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps )
+{
+	GL_BATCH_PERF_CALL_TIMER;
+	// these are really GLSL "shaders" not "programs" but the old reference to "program" persists due to the assembler heritage
+	if (vs->m_vtxProgram && ps->m_pixProgram)
+	{
+		m_ctx->ValidateShaderPair( vs->m_vtxProgram, ps->m_pixProgram );
+	}
+	return S_OK;
+}
+
 // callers need to ifdef POSIX this, because this method does not exist on real DX9
 // 
 HRESULT IDirect3DDevice9::QueryShaderPair( int index, GLMShaderPairInfo *infoOut )
@@ -5307,9 +5327,9 @@ HRESULT IDirect3DDevice9::DrawPrimitiveUP(D3DPRIMITIVETYPE PrimitiveType,UINT Pr
 //	PrimitiveCount
 //	[in] Number of primitives to render. The number of vertices used is a function of the primitive count and the primitive type. The maximum number of primitives allowed is determined by checking the MaxPrimitiveCount member of the D3DCAPS9 structure.
 
-#include "glmgr_flush.inl"
-
 // BE VERY CAREFUL what you do in this function. It's extremely hot, and calling the wrong GL API's in here will crush perf. on NVidia threaded drivers.
+#ifndef OSX
+
 HRESULT IDirect3DDevice9::DrawIndexedPrimitive( D3DPRIMITIVETYPE Type, INT BaseVertexIndex, UINT MinVertexIndex, UINT NumVertices, UINT startIndex, UINT primCount )
 {
 	tmZone( TELEMETRY_LEVEL2, TMZF_NONE, "%s", __FUNCTION__ );
@@ -5321,11 +5341,6 @@ HRESULT IDirect3DDevice9::DrawIndexedPrimitive( D3DPRIMITIVETYPE Type, INT BaseV
 		UpdateBoundFBO();
 	}
 
-	if ( m_bFBODirty )
-	{
-		UpdateBoundFBO();
-	}
-		
 	g_nTotalDrawsOrClears++;
 
 #if GL_BATCH_PERF_ANALYSIS
@@ -5464,6 +5479,202 @@ draw_failed:
 	Assert( 0 );
 	return E_FAIL;
 }
+
+#else
+
+// OSX 10.6 support
+
+HRESULT IDirect3DDevice9::FlushIndexBindings( void )
+{
+	// push index buffer state
+	m_ctx->SetIndexBuffer( m_indices.m_idxBuffer->m_idxBuffer );
+	return S_OK;
+}
+
+HRESULT IDirect3DDevice9::FlushVertexBindings( uint baseVertexIndex )
+{
+	// push vertex buffer state for the current vertex decl
+	// in this variant we just walk the attrib map in the VS and do a pull for each one.
+	// if we can't find a match in the vertex decl, we may fall back to the secret 'dummy' VBO that GLM maintains
+
+	GLMVertexSetup	setup;
+	memset( &setup, 0, sizeof( setup ) );
+
+	IDirect3DVertexDeclaration9 *vxdecl = m_pVertDecl;
+	unsigned char *vshAttribMap = m_vertexShader->m_vtxAttribMap;
+
+	// this loop could be tightened if we knew the number of live entries in the shader attrib map.
+	// which of course would be easy to do in the create shader function or even in the translator.
+
+	GLMVertexAttributeDesc *dstAttr = setup.m_attrs;
+	for( int i=0; i<16; i++,dstAttr++ )
+	{
+		unsigned char vshattrib = vshAttribMap[ i ];
+		if (vshattrib != 0xBB)
+		{
+			// try to find the match in the decl.
+			// idea: put some inverse table in the decl which could accelerate this search.
+
+			D3DVERTEXELEMENT9_GL *elem = m_pVertDecl->m_elements;
+			for( int j=0; j< m_pVertDecl->m_elemCount; j++,elem++)
+			{
+				// if it matches, install it, change vshattrib so the code below does not trigger, then end the loop
+				if ( ((vshattrib>>4) == elem->m_dxdecl.Usage) && ((vshattrib & 0x0F) == elem->m_dxdecl.UsageIndex) )
+				{
+					// targeting attribute #i in the setup with element data #j from the decl
+
+					*dstAttr = elem->m_gldecl;
+
+					// then fix buffer, stride, offset - note that we honor the base vertex index here by fiddling the offset
+					int streamIndex = elem->m_dxdecl.Stream;
+					dstAttr->m_pBuffer = m_streams[ streamIndex ].m_vtxBuffer->m_vtxBuffer;
+					dstAttr->m_stride = m_streams[ streamIndex ].m_stride;
+					dstAttr->m_offset += m_streams[ streamIndex ].m_offset + (baseVertexIndex * dstAttr->m_stride); 
+
+					// set mask
+					setup.m_attrMask |= (1 << i);
+
+					// end loop
+					vshattrib = 0xBB;
+					j = 999;
+				}
+			}
+
+			// if vshattrib is not 0xBB here, that means we could not find a source in the decl for it
+			if (vshattrib != 0xBB)
+			{
+				// fill out attr the same way as usual, we just pass NULL for the buffer and ask GLM to have mercy on us
+
+				dstAttr->m_pBuffer = NULL;
+				dstAttr->m_stride = 0;
+				dstAttr->m_offset = 0;
+
+				// only implement certain usages... if we haven't seen it before, stop.
+				switch (vshattrib >> 4)	// aka usage
+				{
+				case	D3DDECLUSAGE_POSITION:
+				case	D3DDECLUSAGE_BLENDWEIGHT:
+				case	D3DDECLUSAGE_BLENDINDICES:
+					Debugger();
+					break;
+
+				case	D3DDECLUSAGE_NORMAL:
+					dstAttr->m_nCompCount = 3;
+					dstAttr->m_datatype = GL_FLOAT;
+					dstAttr->m_normalized = false;
+					break;
+
+				case	D3DDECLUSAGE_PSIZE:
+					Debugger();
+					break;
+
+				case	D3DDECLUSAGE_TEXCOORD:
+					dstAttr->m_nCompCount = 3;
+					dstAttr->m_datatype = GL_FLOAT;
+					dstAttr->m_normalized = false;
+					break;
+
+				case	D3DDECLUSAGE_TANGENT:
+				case	D3DDECLUSAGE_BINORMAL:
+				case	D3DDECLUSAGE_TESSFACTOR:
+				case	D3DDECLUSAGE_PLUGH:
+					Debugger();
+					break;
+
+				case	D3DDECLUSAGE_COLOR:
+					dstAttr->m_nCompCount = 4;
+					dstAttr->m_datatype = GL_UNSIGNED_BYTE;
+					dstAttr->m_normalized = true;
+					break;
+
+				case	D3DDECLUSAGE_FOG:
+				case	D3DDECLUSAGE_DEPTH:
+				case	D3DDECLUSAGE_SAMPLE:
+					Debugger();
+					break;
+				}
+			}
+		}
+	}
+
+	// copy active program's vertex attrib map into the vert setup info
+	memcpy(&setup.m_vtxAttribMap, m_vertexShader->m_vtxAttribMap, sizeof(m_vertexShader->m_vtxAttribMap));
+
+	m_ctx->SetVertexAttributes(&setup);
+	return S_OK;
+}
+
+
+// OSX path offering support for 10.6 (we do not have support for glDrawRangeElementsBaseVertex)
+HRESULT IDirect3DDevice9::DrawIndexedPrimitive( D3DPRIMITIVETYPE Type,INT BaseVertexIndex,UINT MinVertexIndex,UINT NumVertices,UINT startIndex,UINT primCount )
+{
+	Assert( m_ctx->m_nCurOwnerThreadId == ThreadGetCurrentId() );
+
+	TOGL_NULL_DEVICE_CHECK;
+	if ( m_bFBODirty )
+	{
+		UpdateBoundFBO();
+	}
+
+	g_nTotalDrawsOrClears++;
+
+#if GL_BATCH_PERF_ANALYSIS
+	m_nTotalPrims += primCount;
+	CFastTimer tm;
+	CFlushDrawStatesStats& flushStats = m_ctx->m_FlushStats;
+	tm.Start();
+	flushStats.Clear();
+#endif
+
+#if GLMDEBUG
+	if ( gl.m_FogEnable )
+	{
+		GLMPRINTF(("-D- IDirect3DDevice9::DrawIndexedPrimitive is seeing enabled fog..."));
+	}
+#endif
+
+	if ( ( !m_indices.m_idxBuffer ) || ( !m_vertexShader ) )
+		goto draw_failed;    
+
+	this->FlushIndexBindings( );
+	this->FlushVertexBindings( BaseVertexIndex );
+	m_ctx->FlushDrawStates( MinVertexIndex, MinVertexIndex + NumVertices - 1, 0 );
+
+	if (gl.m_FogEnable)
+	{
+		GLMPRINTF(("-D- IDirect3DDevice9::DrawIndexedPrimitive is seeing enabled fog..."));
+	}
+
+	switch(Type)
+	{
+	case	D3DPT_POINTLIST:
+		Debugger();
+		break;
+
+	case	D3DPT_LINELIST:
+		GLMPRINTF(("-X- IDirect3DDevice9::DrawIndexedPrimitive( D3DPT_LINELIST ) - ignored."));
+		//			Debugger();
+		m_ctx->DrawRangeElements( (GLenum)GL_LINES, (GLuint)MinVertexIndex, (GLuint)(MinVertexIndex + NumVertices), (GLsizei)primCount*2, (GLenum)GL_UNSIGNED_SHORT, (const GLvoid *)(startIndex * sizeof(short)), m_indices.m_idxBuffer->m_idxBuffer );
+		break;
+
+	case	D3DPT_TRIANGLELIST:
+		m_ctx->DrawRangeElements(GL_TRIANGLES, (GLuint)MinVertexIndex, (GLuint)(MinVertexIndex + NumVertices), (GLsizei)primCount*3, (GLenum)GL_UNSIGNED_SHORT, (const GLvoid *)(startIndex * sizeof(short)), m_indices.m_idxBuffer->m_idxBuffer );
+		break;
+
+	case D3DPT_TRIANGLESTRIP:
+		// enabled... Debugger();
+		m_ctx->DrawRangeElements(GL_TRIANGLE_STRIP, (GLuint)MinVertexIndex, (GLuint)(MinVertexIndex + NumVertices), (GLsizei)(2+primCount), (GLenum)GL_UNSIGNED_SHORT, (const GLvoid *)(startIndex * sizeof(short)), m_indices.m_idxBuffer->m_idxBuffer );
+		break;
+	}
+
+	return S_OK;
+
+draw_failed:
+	Assert( 0 );
+	return E_FAIL;
+}
+
+#endif // #ifndef OSX
 
 HRESULT IDirect3DDevice9::DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE PrimitiveType,UINT MinVertexIndex,UINT NumVertices,UINT PrimitiveCount,CONST void* pIndexData,D3DFORMAT IndexDataFormat,CONST void* pVertexStreamZeroData,UINT VertexStreamZeroStride)
 {
@@ -5680,7 +5891,6 @@ void IDirect3DDevice9::SetGammaRamp(UINT iSwapChain,DWORD Flags,CONST D3DGAMMARA
 	Assert( GetCurrentOwnerThreadId() == ThreadGetCurrentId() );
 	
 	if ( g_pLauncherMgr )
-
 	{
 		g_pLauncherMgr->SetGammaRamp( pRamp->red, pRamp->green, pRamp->blue );
 	}
@@ -6414,29 +6624,26 @@ D3DXMATRIX* D3DXMatrixMultiply( D3DXMATRIX *pOut, CONST D3DXMATRIX *pM1, CONST D
 #pragma warning(pop)
 #endif
 
-D3DXVECTOR3* D3DXVec3TransformCoord( D3DXVECTOR3 *pOut, CONST D3DXVECTOR3 *pV, CONST D3DXMATRIX *pM )		// http://msdn.microsoft.com/en-us/library/ee417622(VS.85).aspx
+// Transform a 3D vector by a given matrix, projecting the result back into w = 1
+// http://msdn.microsoft.com/en-us/library/ee417622(VS.85).aspx
+D3DXVECTOR3* D3DXVec3TransformCoord(D3DXVECTOR3 *pOut, CONST D3DXVECTOR3 *pV, CONST D3DXMATRIX *pM)
 {
-	// this one is tricky because
-	// "Transforms a 3D vector by a given matrix, projecting the result back into w = 1".
-	// but the vector has no W attached to it coming in, so we have to go through the motions of figuring out what w' would be
-	// assuming the input vector had a W of 1.
-	
-	// dot product of [a b c 1] against w column
-	float wp = (pM->m[3][0] * pV->x) + (pM->m[3][1] * pV->y) + (pM->m[3][2] * pV->z) + (pM->m[3][3]);
-	
-	if (wp == 0.0f )
+	D3DXVECTOR3 vOut;
+
+	float norm = (pM->m[0][3] * pV->x) + (pM->m[1][3] * pV->y) + (pM->m[2][3] *pV->z) + pM->m[3][3];
+	if ( norm )
 	{
-		// do something to avoid dividing by zero..
-		DXABSTRACT_BREAK_ON_ERROR();
+		float norm_inv = 1.0f / norm;
+		vOut.x = (pM->m[0][0] * pV->x + pM->m[1][0] * pV->y + pM->m[2][0] * pV->z + pM->m[3][0]) * norm_inv;
+		vOut.y = (pM->m[0][1] * pV->x + pM->m[1][1] * pV->y + pM->m[2][1] * pV->z + pM->m[3][1]) * norm_inv;
+		vOut.z = (pM->m[0][2] * pV->x + pM->m[1][2] * pV->y + pM->m[2][2] * pV->z + pM->m[3][2]) * norm_inv;
 	}
 	else
 	{
-		// unclear on whether I should include the fake W in the sum (last term) before dividing by wp... hmmmm
-		// leave it out for now and see how well it works
-		pOut->x = ((pM->m[0][0] * pV->x) + (pM->m[0][1] * pV->y) + (pM->m[0][2] * pV->z) /* + (pM->m[0][3]) */ ) / wp;
-		pOut->y = ((pM->m[1][0] * pV->x) + (pM->m[1][1] * pV->y) + (pM->m[1][2] * pV->z) /* + (pM->m[1][3]) */ ) / wp;
-		pOut->z = ((pM->m[2][0] * pV->x) + (pM->m[2][1] * pV->y) + (pM->m[2][2] * pV->z) /* + (pM->m[2][3]) */ ) / wp;
+		vOut.x = vOut.y = vOut.z = 0.0f;
 	}
+
+	*pOut = vOut;
 
 	return pOut;
 }
@@ -6467,13 +6674,13 @@ D3DXMATRIX* D3DXMatrixInverse( D3DXMATRIX *pOut, FLOAT *pDeterminant, CONST D3DX
 	Assert( sizeof( D3DXMATRIX ) == (16 * sizeof(float) ) );
 	Assert( sizeof( VMatrix ) == (16 * sizeof(float) ) );
 	Assert( pDeterminant == NULL );	// homey don't play that
-	
+
 	VMatrix *origM = (VMatrix*)pM;
 	VMatrix *destM = (VMatrix*)pOut;
-	
+
 	bool success = MatrixInverseGeneral( *origM, *destM ); (void)success;
 	Assert( success );
-	
+
 	return pOut;
 }
 
@@ -6615,7 +6822,6 @@ HRESULT D3DXCompileShader(
 	return S_OK;
 }
 
-
 #if defined(DX_TO_GL_ABSTRACTION)
 void toglGetClientRect( void *hWnd, RECT *destRect )
 {
@@ -6639,6 +6845,5 @@ void toglGetClientRect( void *hWnd, RECT *destRect )
 }
 
 #endif
-
 
 #endif

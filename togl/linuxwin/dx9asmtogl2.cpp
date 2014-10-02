@@ -34,7 +34,7 @@
 #include "tier1/utlbuffer.h"
 #include "dx9asmtogl2.h"
 
-#include "materialsystem/ishader.h"
+#include "materialsystem/IShader.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -1107,7 +1107,7 @@ void D3DToGL::PrintParameterToString ( uint32 dwToken, uint32 dwSourceOrDest, ch
 	uint32 dwSrcModifier = D3DSPSM_NONE;
 
 	// Clear string to zero length
-	V_snprintf( pRegisterName, nBufLen, "" );
+	pRegisterName[ 0 ] = 0;
 
 	dwRegType = GetRegTypeFromToken( dwToken );
 

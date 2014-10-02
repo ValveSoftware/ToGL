@@ -36,7 +36,6 @@
 #include "tier0/platform.h"
 #include "tier0/vprof_telemetry.h"
 #include "interface.h"
-
 #include "togl/rendermechanism.h"
 
 void *VoidFnPtrLookup_GlMgr(const char *fn, bool &okay, const bool bRequired, void *fallback=NULL);

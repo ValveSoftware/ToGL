@@ -33,6 +33,11 @@
 
 #pragma once
 
+#undef HAVE_GL_ARB_SYNC
+#ifndef OSX
+#define HAVE_GL_ARB_SYNC 1
+#endif
+
 #include "glbase.h"
 #include "glentrypoints.h"
 #include "glmdebug.h"
@@ -46,7 +51,7 @@
 #include "cglmquery.h"
 
 #include "tier0/vprof_telemetry.h"
-#include "materialsystem/ishader.h"
+#include "materialsystem/IShader.h"
 #include "dxabstract_types.h"
 #include "tier0/icommandline.h"
 
@@ -1199,6 +1204,7 @@ public:
 };
 
 //===========================================================================//
+#ifndef OSX
 
 #ifndef GL_EXTERNAL_VIRTUAL_MEMORY_BUFFER_AMD
 #define GL_EXTERNAL_VIRTUAL_MEMORY_BUFFER_AMD 0x9160
@@ -1212,7 +1218,16 @@ class CPinnedMemoryBuffer
 	CPinnedMemoryBuffer & operator= ( const CPinnedMemoryBuffer & );
 
 public:
-	CPinnedMemoryBuffer() : m_pRawBuf( NULL ), m_pBuf( NULL ), m_nSize( 0 ), m_nOfs( 0 ), m_nBufferObj( 0 ), m_nSyncObj( 0 )
+	CPinnedMemoryBuffer()
+	: 
+		m_pRawBuf( NULL ) 
+		, m_pBuf( NULL )
+		, m_nSize( 0 )
+		, m_nOfs( 0 )
+		, m_nBufferObj( 0 )
+#ifdef HAVE_GL_ARB_SYNC
+		, m_nSyncObj( 0 )
+#endif
 	{
 	}
 
@@ -1271,26 +1286,30 @@ public:
 
 	void InsertFence()
 	{
+#ifdef HAVE_GL_ARB_SYNC
 		if ( m_nSyncObj  )
 		{
 			gGL->glDeleteSync( m_nSyncObj );
-			}
+		}
 
 		m_nSyncObj = gGL->glFenceSync( GL_SYNC_GPU_COMMANDS_COMPLETE, 0 );
+#endif
 	}
 
 	void BlockUntilNotBusy()
 	{
+#ifdef HAVE_GL_ARB_SYNC
 		if ( m_nSyncObj )
-	{
+		{
 			gGL->glClientWaitSync( m_nSyncObj, GL_SYNC_FLUSH_COMMANDS_BIT, 3000000000000ULL );
 
 			gGL->glDeleteSync( m_nSyncObj );
 								
 			m_nSyncObj = 0;
-			}
-		m_nOfs = 0;
 		}
+#endif
+		m_nOfs = 0;
+	}
 
 	void Append( uint nSize )
 	{
@@ -1305,9 +1324,11 @@ private:
 	uint m_nOfs;
 
 	GLuint m_nBufferObj;
-	
+#ifdef HAVE_GL_ARB_SYNC
 	GLsync m_nSyncObj;
+#endif
 };
+#endif // !OSX
 
 //===========================================================================//
 
@@ -1385,6 +1406,7 @@ class GLMContext
 		void	SetDrawingLang( EGLMProgramLang lang, bool immediate=false );	// choose ARB or GLSL.  immediate=false defers lang change to top of frame
 		
 		void	LinkShaderPair( CGLMProgram *vp, CGLMProgram *fp );			// ensure this combo has been linked and is in the GLSL pair cache
+		void	ValidateShaderPair( CGLMProgram *vp, CGLMProgram *fp );
 		void	ClearShaderPairCache( void );								// call this to shoot down all the linked pairs
 		void	QueryShaderPair( int index, GLMShaderPairInfo *infoOut );	// this lets you query the shader pair cache for saving its state
 		
@@ -1428,8 +1450,12 @@ class GLMContext
 		void FlushDrawStatesNoShaders();
 				
 		// drawing
+#ifndef OSX
 		FORCEINLINE void DrawRangeElements(	GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const GLvoid *indices, uint baseVertex, CGLMBuffer *pIndexBuf );
 		void DrawRangeElementsNonInline(	GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const GLvoid *indices, uint baseVertex, CGLMBuffer *pIndexBuf );
+#else
+		void DrawRangeElements( GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const GLvoid *indices, CGLMBuffer *pIndexBuf );
+#endif
 
 		void	CheckNative( void );
 		
@@ -1531,8 +1557,10 @@ class GLMContext
 		GLMContext( IDirect3DDevice9 *pDevice, GLMDisplayParams *params );
 		~GLMContext();
 
+#ifndef OSX
 		FORCEINLINE GLuint FindSamplerObject( const GLMTexSamplingParams &desiredParams );
-		
+#endif
+
 		FORCEINLINE void SetBufAndVertexAttribPointer( uint nIndex, GLuint nGLName, GLuint stride, GLuint datatype, GLboolean normalized, GLuint nCompCount, const void *pBuf, uint nRevision )
 		{
 			VertexAttribs_t &curAttribs = m_boundVertexAttribs[nIndex];
@@ -1618,9 +1646,13 @@ class GLMContext
 		// debug font
 		void GenDebugFontTex( void );
 		void DrawDebugText( float x, float y, float z, float drawCharWidth, float drawCharHeight, char *string );
-		
+
+#ifndef OSX
 		CPinnedMemoryBuffer *GetCurPinnedMemoryBuffer( ) { return &m_PinnedMemoryBuffers[m_nCurPinnedMemoryBuffer]; }
-						
+#endif
+
+		CPersistentBuffer* GetCurPersistentBuffer( EGLMBufferType type ) { return &( m_persistentBuffer[m_nCurPersistentBuffer][type] ); }
+
 		// members------------------------------------------
 						
 		// context
@@ -1628,6 +1660,7 @@ class GLMContext
 		uint							m_nThreadOwnershipReleaseCounter;
 
 		bool							m_bUseSamplerObjects;
+		bool							m_bTexClientStorage;
 
 		IDirect3DDevice9				*m_pDevice;
 		GLMRendererInfoFields			m_caps;
@@ -1754,6 +1787,10 @@ class GLMContext
 		CGLMProgram						*m_preload3DTexFragmentProgram;
 		CGLMProgram						*m_preloadCubeTexFragmentProgram;
 
+#if defined( OSX ) && defined( GLMDEBUG )
+		CGLMProgram						*m_boundProgram[ kGLMNumProgramTypes ];
+#endif
+
 		CGLMShaderPairCache				*m_pairCache;				// GLSL only
 		CGLMShaderPair					*m_pBoundPair;				// GLSL only
 
@@ -1805,10 +1842,16 @@ class GLMContext
 		uint m_nCurFrame;
 		uint m_nBatchCounter;
 
+#ifndef OSX
 		enum { cNumPinnedMemoryBuffers = 4 };
 		CPinnedMemoryBuffer m_PinnedMemoryBuffers[cNumPinnedMemoryBuffers];
 		uint m_nCurPinnedMemoryBuffer;
-		
+#endif
+
+		enum { cNumPersistentBuffers = 3 };
+		CPersistentBuffer	m_persistentBuffer[cNumPersistentBuffers][kGLMNumBufferTypes];
+		uint				m_nCurPersistentBuffer;
+
 		void SaveColorMaskAndSetToDefault();
 		void RestoreSavedColorMask();
 		GLColorMaskSingle_t				m_SavedColorMask;
@@ -1848,6 +1891,8 @@ class GLMContext
 #endif
 };
 
+#ifndef OSX
+
 FORCEINLINE void GLMContext::DrawRangeElements(	GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const GLvoid *indices, uint baseVertex, CGLMBuffer *pIndexBuf )
 {
 #if GL_ENABLE_INDEX_VERIFICATION
@@ -1862,15 +1907,19 @@ FORCEINLINE void GLMContext::DrawRangeElements(	GLenum mode, GLuint start, GLuin
 
 	++m_nBatchCounter;
 
-			SetIndexBuffer( pIndexBuf );
+	SetIndexBuffer( pIndexBuf );
 
 	void *indicesActual = (void*)indices;
 
-		if ( pIndexBuf->m_bPseudo )
-		{
-			// you have to pass actual address, not offset
-			indicesActual = (void*)( (int)indicesActual + (int)pIndexBuf->m_pPseudoBuf );
-		}
+	if ( pIndexBuf->m_bPseudo )
+	{
+		// you have to pass actual address, not offset
+		indicesActual = (void*)( (int)indicesActual + (int)pIndexBuf->m_pPseudoBuf );
+	}
+	if (pIndexBuf->m_bUsingPersistentBuffer)
+	{
+		indicesActual = (void*)( (int)indicesActual + (int)pIndexBuf->m_nPersistentBufferStartOffset );
+	}
 
 //#if GLMDEBUG
 #if 0
@@ -1954,6 +2003,8 @@ FORCEINLINE void GLMContext::DrawRangeElements(	GLenum mode, GLuint start, GLuin
 
 #endif // GL_ENABLE_INDEX_VERIFICATION
 }
+
+#endif // #ifndef OSX
 
 FORCEINLINE void GLMContext::SetVertexProgram( CGLMProgram *pProg )
 {
@@ -2239,7 +2290,7 @@ FORCEINLINE void GLMContext::BindIndexBufferToCtx( CGLMBuffer *buff )
 		
 	Assert( !buff || ( buff->m_buffGLTarget == GL_ELEMENT_ARRAY_BUFFER_ARB ) );
 
-	GLuint nGLName = buff ? buff->m_nHandle : 0;
+	GLuint nGLName = buff ? buff->GetHandle() : 0;
 
 	if ( m_nBoundGLBuffer[ kGLMIndexBuffer] == nGLName )
 		return;
@@ -2254,7 +2305,7 @@ FORCEINLINE void GLMContext::BindVertexBufferToCtx( CGLMBuffer *buff )
 
 	Assert( !buff || ( buff->m_buffGLTarget == GL_ARRAY_BUFFER_ARB ) );
 
-	GLuint nGLName = buff ? buff->m_nHandle : 0;
+	GLuint nGLName = buff ? buff->GetHandle() : 0;
 
 	if ( m_nBoundGLBuffer[ kGLMVertexBuffer] == nGLName )
 		return;

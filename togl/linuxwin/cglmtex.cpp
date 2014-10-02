@@ -137,8 +137,11 @@ const GLMTexFormatDesc g_formatDescTable[] =
 	{ "_V8U8",			D3DFMT_V8U8,			GL_RGB8,							0,									GL_RG,					GL_BYTE,						1, 2 },
 	
 	{ "_R32F",			D3DFMT_R32F,			GL_R32F,							GL_R32F,							GL_RED,					GL_FLOAT,						1, 4 },
+//$ TODO: Need to merge bitmap changes over from Dota to get these formats.
+#if 0
 	{ "_A2R10G10B10",	D3DFMT_A2R10G10B10,		GL_RGB10_A2,						GL_RGB10_A2,						GL_RGBA,				GL_UNSIGNED_INT_10_10_10_2,		1, 4 },
 	{ "_A2B10G10R10",	D3DFMT_A2B10G10R10,		GL_RGB10_A2,						GL_RGB10_A2,						GL_BGRA,				GL_UNSIGNED_INT_10_10_10_2,		1, 4 },
+#endif
 
 	/*
 		// NV shadow depth tex
@@ -697,9 +700,6 @@ void CGLMTexLayoutTable::DumpStats( )
 	}
 }
 
-
-ConVar gl_texclientstorage( "gl_texclientstorage", "1" );		// default 1 for L4D2
-
 ConVar gl_texmsaalog ( "gl_texmsaalog", "0");
 
 ConVar gl_rt_forcergba ( "gl_rt_forcergba", "1" );	// on teximage of a renderable tex, pass GL_RGBA in place of GL_BGRA
@@ -760,8 +760,10 @@ CGLMTex::CGLMTex( GLMContext *ctx, GLMTexLayout *layout, const char *debugLabel 
 	m_pBlitSrcFBO = NULL;
 	m_pBlitDstFBO = NULL;
 
-	//sense whether to try and apply client storage upon teximage/subimage
-	m_texClientStorage = gl_texclientstorage.GetInt() != 0;
+	// Sense whether to try and apply client storage upon teximage/subimage.
+	//  This should only be true if we're running on OSX 10.6 or it was explicitly
+	//  enabled with -gl_texclientstorage on the command line.
+	m_texClientStorage = ctx->m_bTexClientStorage;
 	
 	// flag that we have not yet been explicitly kicked into VRAM..
 	m_texPreloaded = false;
@@ -1739,6 +1741,16 @@ void CGLMTex::Unlock( GLMTexLockParams *params )
 		{
 			m_sliceFlags[slice] &= ~( kSliceLocked | kSliceFullyDirty );
 		}
+		
+		// The 3D texture upload code seems to rely on the host copy, probably
+		// because it reuploads the whole thing each slice; we only use 3D textures
+		// for the 32x32x32 colorpsace conversion lookups and debugging the problem
+		// would not save any more memory.
+		if ( !m_texClientStorage && ( m_texGLTarget == GL_TEXTURE_2D ) )
+		{
+			free(m_backing);
+			m_backing = NULL;
+		}
 	}
 }
 
@@ -1760,12 +1772,13 @@ void CGLMTex::HandleSRGBMismatch( bool srgb, int &srgbFlipCount )
 
 		m_srgbFlipCount++;
 
+#if GLMDEBUG
 		//policy: print the ones that have flipped 1 or N times
-		bool print_allflips		= CommandLine()->FindParm("-glmspewallsrgbflips");
-		bool print_firstflips	= CommandLine()->FindParm("-glmspewfirstsrgbflips");
-		bool print_freqflips	= CommandLine()->FindParm("-glmspewfreqsrgbflips");
-		bool print_crawls		= CommandLine()->FindParm("-glmspewsrgbcrawls");
-		bool print_maxcrawls	= CommandLine()->FindParm("-glmspewsrgbmaxcrawls");
+		static bool print_allflips		= CommandLine()->FindParm("-glmspewallsrgbflips");
+		static bool print_firstflips	= CommandLine()->FindParm("-glmspewfirstsrgbflips");
+		static bool print_freqflips	= CommandLine()->FindParm("-glmspewfreqsrgbflips");
+		static bool print_crawls		= CommandLine()->FindParm("-glmspewsrgbcrawls");
+		static bool print_maxcrawls	= CommandLine()->FindParm("-glmspewsrgbmaxcrawls");
 		bool print_it = false;
 
 		if (print_allflips)
@@ -1827,6 +1840,7 @@ void CGLMTex::HandleSRGBMismatch( bool srgb, int &srgbFlipCount )
 			}
 #endif
 		}
+#endif // GLMDEBUG
 
 #if GLMDEBUG && 0
 		//"toi" = texture of interest
@@ -1839,7 +1853,8 @@ void CGLMTex::HandleSRGBMismatch( bool srgb, int &srgbFlipCount )
 #endif
 
 		// re-submit the tex unless we're stifling it
-		if (!CommandLine()->FindParm( "-glmnosrgbflips" ))
+		static bool s_nosrgbflips = CommandLine()->FindParm( "-glmnosrgbflips" );
+		if ( !s_nosrgbflips )
 		{
 			ResetSRGB( srgb, false );
 		}
@@ -1934,7 +1949,7 @@ void CGLMTex::ResetSRGB( bool srgb, bool noDataWrite )
 				WriteTexels( &desc, true, noDataWrite );	// write whole slice. and avoid pushing real bits if the caller requests (RT's)
 			}
 		}
-		
+
 		// put it back
 		m_ctx->BindTexToTMU( tmu0save, 0 );
 	}

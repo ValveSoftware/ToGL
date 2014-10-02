@@ -12,6 +12,8 @@ FORCEINLINE uint32 bitmix32(uint32 a)
 	return a;
 }
 
+#ifndef OSX
+
 FORCEINLINE GLuint GLMContext::FindSamplerObject( const GLMTexSamplingParams &desiredParams )
 {
 	int h = bitmix32( desiredParams.m_bits + desiredParams.m_borderColor ) & ( cSamplerObjectHashSize - 1 );
@@ -37,6 +39,8 @@ FORCEINLINE GLuint GLMContext::FindSamplerObject( const GLMTexSamplingParams &de
 
 	return m_samplerObjectHash[h].m_samplerObject;
 }
+
+#endif // !OSX
 
 // BE VERY CAREFUL WHAT YOU DO IN HERE. This is called on every batch, even seemingly simple changes can kill perf.
 FORCEINLINE void GLMContext::FlushDrawStates( uint nStartIndex, uint nEndIndex, uint nBaseVertex )	// shadersOn = true for draw calls, false for clear calls
@@ -185,7 +189,12 @@ FORCEINLINE void GLMContext::FlushDrawStates( uint nStartIndex, uint nEndIndex, 
 #endif
 
 			if ( !pNewPair->m_valid )
-				goto flush_error_exit;
+			{
+				if ( !pNewPair->ValidateProgramPair() )
+				{
+					goto flush_error_exit;
+				}
+			}
 
 			gGL->glUseProgram( (GLuint)pNewPair->m_program );
 			
@@ -245,6 +254,7 @@ FORCEINLINE void GLMContext::FlushDrawStates( uint nStartIndex, uint nEndIndex, 
 	
 	GL_BATCH_PERF( m_FlushStats.m_nNumChangedSamplers += m_nNumDirtySamplers );
 
+#if !defined( OSX ) // no support for sampler objects in OSX 10.6 (GL 2.1 profile)
 	if ( m_bUseSamplerObjects)
 	{
 		while ( m_nNumDirtySamplers )
@@ -258,7 +268,7 @@ FORCEINLINE void GLMContext::FlushDrawStates( uint nStartIndex, uint nEndIndex, 
 
 			GL_BATCH_PERF( m_FlushStats.m_nNumSamplingParamsChanged++ );
 
-#if defined( OSX )
+#if defined( OSX ) // valid for OSX only if using GL 3.3 context 
 			CGLMTex *pTex = m_samplers[nSamplerIndex].m_pBoundTex;
 
 			if( pTex && !( gGL->m_bHave_GL_EXT_texture_sRGB_decode ) )
@@ -276,6 +286,7 @@ FORCEINLINE void GLMContext::FlushDrawStates( uint nStartIndex, uint nEndIndex, 
 		}
 	}
 	else
+#endif // if !defined( OSX )
 	{
 		while ( m_nNumDirtySamplers )
 		{
@@ -545,8 +556,12 @@ FORCEINLINE void GLMContext::FlushDrawStates( uint nStartIndex, uint nEndIndex, 
 			int nBufOffset = pDeclElem->m_gldecl.m_offset + pStream->m_offset;
 			Assert( nBufOffset >= 0 );
 			Assert( nBufOffset < (int)pBuf->m_nSize );
+			if ( pBuf->m_bUsingPersistentBuffer )
+			{
+				nBufOffset += pBuf->m_nPersistentBufferStartOffset;
+			}
 
-			SetBufAndVertexAttribPointer( nIndex, pBuf->m_nHandle, 
+			SetBufAndVertexAttribPointer( nIndex, pBuf->GetHandle(), 
 				pStream->m_stride, pDeclElem->m_gldecl.m_datatype, pDeclElem->m_gldecl.m_normalized, pDeclElem->m_gldecl.m_nCompCount, 
 				reinterpret_cast< const GLvoid * >( reinterpret_cast< int >( pBuf->m_pPseudoBuf ) + nBufOffset ), 
 				pBuf->m_nRevision );

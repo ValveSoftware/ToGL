@@ -33,7 +33,9 @@
 
 #undef HAVE_GL_ARB_SYNC
 
+#ifndef OSX
 #define HAVE_GL_ARB_SYNC 1
+#endif
 
 #ifdef USE_SDL
 #include "SDL_opengl.h"
